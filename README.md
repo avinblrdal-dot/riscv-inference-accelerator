@@ -3,7 +3,7 @@
 **An open characterization of the energy / accuracy / area design space for
 neural network inference at microcontroller scale.**
 
-Regeneron ISEF 2027 · Embedded Systems (EBED)
+Embedded Systems (EBED)
 
 ---
 
