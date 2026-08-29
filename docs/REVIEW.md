@@ -440,13 +440,16 @@ Ordered by urgency. Effort estimates assume one student who has read the docs.
 
 | # | Gap | Urgency | Effort | Notes |
 |---|---|---|---|---|
-| **G1** | `nn_dot4.c` / `nn_array.c` not covered by full-model parity | **Highest** | 1–2 days | Needs host stubs for the intrinsics, or a RISC-V simulator in the loop. Until then, a divergence in the accelerated path is invisible. |
+| ~~G1~~ | ~~accelerated variants not parity-checked~~ | **CLOSED** | done | All three variants now run the full model on the simulated core and produce the same correct class. Closing it found **three real bugs** — see the addendum. |
 | **G2** | Firmware never cross-compiled | High | 0.5 day | Install toolchain, `make -C sw`, run `tb_soc` with real firmware. Everything is written and the host build is clean under `-Werror`. |
 | **G3** | RQ1 not answered | High | 0.5 day after G2 | The baseline MAC fraction sets the Amdahl ceiling and bounds every claim. Do it early — it may change the plan. |
 | **G4** | Vivado flow never executed | High | 1–3 days | Includes install. **Verify `-generic` propagation on the first run** by diffing two configs' `summary.txt`. |
 | **G5** | No real training run | High | 2–4 days | Blocked on datasets. Pipeline is verified with synthetic weights. |
 | **G6** | Dataset URLs unverified | High | 0.5 day | `TODO_BLOCKED` TB001. |
 | **G7** | No energy measurements | High | Blocked on PPK2 | All scripts written, never run. Treat first use as bring-up. |
+| **G16** | Sweep varies array width and buffer depth, but the array is idle 99.8% of the time and never stalls | **Highest** | 1–2 days | The bottleneck is the CPU→accelerator interface, not the array. The sweep as designed may measure a factor that has no effect. Needs a DMA or burst path, or the experiment reframed. |
+| ~~G2~~ | ~~firmware never cross-compiled~~ | **CLOSED** | done | All three variants build; found 3 real bugs. |
+| ~~G3~~ | ~~RQ1 not answered~~ | **CLOSED** | done | 99.48% MAC fraction, 191× ceiling. |
 | ~~G8~~ | ~~Verilator lint never run~~ | **CLOSED** | done | Verilator 5.050 now runs clean across all 11 modules. Found and fixed 3 real issues -- see below. |
 | **G9** | Activation scales never calibrated | Medium | 1 day | Currently defaults. `quantize.py` warns. Accuracy is not meaningful until this is done. |
 | **G10** | ESP32-S3 project is a README only | Medium | 2–3 days | Skeleton and fairness requirements documented. |
@@ -498,6 +501,75 @@ waiver and fix it, because that is a real bug.
 
 Bit-exactness was re-verified after all three fixes: 10/10 parity stages and
 871 RTL checks still pass.
+
+---
+
+## Addendum 2: closing G1 found three real bugs
+
+G1 was ranked highest-urgency on the theory that an undetected divergence in
+the accelerated path would masquerade as a result. That is exactly what
+happened. On its first run the array variant was **5.1× faster than baseline
+and produced the wrong answer** — predicted class 1 against a golden 2. Fast,
+confident, and wrong is the worst possible failure mode, and no existing test
+caught it.
+
+Three distinct defects, all silent:
+
+1. **Double bus accept** ([D013](DECISIONS.md)). `mem_ready` is a one-cycle
+   pulse but the master holds `mem_valid` longer, so `mem_valid && !mem_ready`
+   fired twice and every operand was written to two addresses. **The same root
+   cause as D008**, in a different interface — this is the project's
+   characteristic failure mode, and every handshake needs an explicit
+   one-shot guard.
+2. **Synchronous-memory off-by-one** ([D014](DECISIONS.md)). The array was
+   enabled in the same cycle the read address was issued, one cycle before the
+   data arrived.
+3. **Operand contract mismatch** ([D015](DECISIONS.md)). The software packed
+   four consecutive elements per word, as `DOT4` consumes them; the array
+   instead expects one value per lane across four output channels. Only every
+   fourth element was used.
+
+**How they were found.** Not by any testbench — by a purpose-built minimal
+probe (`sw/test/accel_probe.c`) that computes the same dot product in plain C
+and compares, plus an RTL trace (`ACCEL_TRACE`) printing the operands the
+array actually consumed. The trace showed `1,1,2,2,3,3,4,4` where `1..8` was
+expected, which identified defect 1 immediately.
+
+**Lesson worth generalising:** unit tests that drive an interface more politely
+than the real master will miss protocol bugs. Both D008 and D013 passed their
+unit tests and failed only under a real bus master.
+
+**Remaining gap.** The variants are checked to agree on the final
+classification, not yet on every intermediate tensor. Class agreement across
+three structurally different implementations is strong evidence, but
+full-tensor comparison would be stronger.
+
+---
+
+## Addendum 3: the array is idle 99.8% of the time (new gap G16)
+
+With all three bugs fixed, the array variant is correct and 4.36× faster than
+baseline. But:
+
+| | |
+|---|---|
+| Accelerator busy | 109,632 cycles |
+| Total run | 60,453,159 cycles |
+| **Utilisation** | **0.18%** |
+| Internal stalls | **0** |
+
+The array never starves and is almost never used. The cost is entirely the CPU
+packing operands and storing them one 32-bit word at a time.
+
+**This has direct consequences for the experiment.** `sweep_config.yaml`
+varies `wbuf_depth` to test whether local buffering reduces stalls — but
+stalls are already zero, so that factor may show **no effect at all**, and
+RQ3's interaction hypothesis cannot be tested at the level it was posed.
+
+This is not a failure; it is a measurement telling us the model was wrong
+about where the bottleneck lives. The honest response is to reframe RQ3 around
+the **CPU-to-accelerator interface** (DMA, burst transfers, bus width) and say
+so explicitly, rather than sweeping a factor already known to be inert.
 
 ---
 

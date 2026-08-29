@@ -238,6 +238,75 @@ warns loudly when it loads synthetic rows.
 
 ---
 
+## D013 — Bus accept must be one-shot (a bug that produced fast wrong answers)
+
+**Decision.** `accel_top.v` uses a sticky `bus_served` flag so each bus
+request takes effect exactly once.
+
+**Why.** `mem_ready` is a single-cycle pulse, but the master may hold
+`mem_valid` high after that pulse returns low. The condition
+`mem_valid && !mem_ready` therefore becomes true a *second* time and every
+side effect fires twice. Observed symptom: each pushed operand was written to
+two consecutive buffer addresses and the write pointer advanced by two, so the
+activation buffer held `1,1,2,2,3,3,4,4` instead of `1..8`.
+
+**This is the same bug as [D008](#d008), from the same root cause** — a master
+holding a request asserted longer than the slave's response pulse. Having hit
+it twice in two different interfaces, treat it as the house failure mode:
+*any* handshake in this project needs an explicit one-shot guard.
+
+**How it was caught.** Not by any testbench. The full model ran, terminated,
+and produced a confident classification that was simply wrong (predicted 1
+against a golden 2). It took a purpose-built minimal probe
+(`sw/test/accel_probe.c`) that computes the same dot product in plain C and
+compares, plus an RTL trace of the operands the array actually consumed.
+
+---
+
+## D014 — Synchronous buffers need a one-cycle control delay
+
+**Decision.** `accel_top.v` delays `arr_clr`, `arr_en` and `res_push` by one
+cycle relative to `accel_ctrl`'s address generation.
+
+**Why.** The buffers are synchronous: an address registered in cycle *t*
+yields data in cycle *t+1*. But the FSM registers `arr_en` in the same cycle
+*t*, so the array accumulated one step ahead of its own data — multiplying
+whatever the buffer held from the previous access, and dropping the final
+element of every reduction. `res_push` is delayed with it, or the finished
+tile would be captured one cycle before the last accumulate lands.
+
+The classic synchronous-memory off-by-one: no hang, no warning, confident
+wrong answer.
+
+---
+
+## D015 — The software must match the array's operand contract
+
+**Decision.** `nn_array.c` packs one value per lane *across output channels*,
+not four consecutive values of one vector.
+
+**Why.** `accel_top.v` fans buffer words out so that row *i* reads activation
+lane `i%4` and column *j* reads weight lane `j%4`. A buffer word therefore
+holds one value for each of four different rows/columns at the same *k* — it
+is **not** a 4-element slice of one vector, which is what `DOT4` consumes.
+
+The original code packed `pack4(w[k], w[k+1], w[k+2], w[k+3])` with
+`K = in_dim/4`, so with `M=N=1` only cell (0,0) was read and the accumulator
+became `sum over w of a[4w]*b[4w]` — **every fourth element, three quarters of
+the data silently discarded.**
+
+Two further constraints now respected: `K` is tiled to the buffer depth (the
+FC layer's `in_dim = 1024` overran a 256-word buffer and wrapped the write
+pointer), and the array geometry is **discovered at run time** through
+`ACCEL_REG_CONFIG` rather than assumed, because the sweep builds many shapes
+from one firmware image.
+
+**Known limitation, to report honestly.** The 32-bit operand path fans out as
+lane `j%4`, so only `min(ARRAY_W, 4)` columns are independent. An 8-wide build
+does **not** double throughput under this mapping.
+
+---
+
 ## TODO_BLOCKED items
 
 These could not be completed and are **not** worked around with invented data.

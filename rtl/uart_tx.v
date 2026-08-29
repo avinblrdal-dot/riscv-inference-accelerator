@@ -59,7 +59,14 @@ module uart_tx #(
     reg [7:0]  shifter;
 
     // Held one cycle per bit period.
-    wire tick = (clk_cnt == CLKS_PER_BIT - 1);
+    //
+    // CLKS_PER_BIT is a 32-bit parameter but clk_cnt is 16 bits, so the
+    // comparison was mixed-width. It happens to work for every value we use
+    // (100 MHz / 115200 = 868), but a CLKS_PER_BIT above 65535 -- a slow
+    // clock or a very low baud rate -- would compare against a truncated
+    // constant and the UART would run at the wrong rate. Narrowing the
+    // constant explicitly makes the 16-bit limit visible instead of implicit.
+    wire tick = (clk_cnt == CLKS_PER_BIT[15:0] - 16'd1);
 
     always @(posedge clk) begin
         if (!resetn) begin

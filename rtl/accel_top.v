@@ -70,8 +70,35 @@ module accel_top #(
     // Only the low 8 bits select a register; the upper bits are compared
     // against the base address by soc_top before mem_valid reaches us.
     wire [7:0] reg_sel = mem_addr[7:0];
-    wire       is_write = mem_valid && (mem_wstrb != 4'b0000);
-    wire       is_read  = mem_valid && (mem_wstrb == 4'b0000);
+
+    // ONE ACCEPT PER REQUEST -- and `!mem_ready` is not sufficient to
+    // guarantee it.
+    //
+    // mem_ready is a single-cycle pulse, but the master may still be holding
+    // mem_valid high after that pulse has returned low. In that window
+    // `mem_valid && !mem_ready` becomes true a SECOND time and every side
+    // effect fires twice.
+    //
+    // The observed symptom: each pushed operand was written to two
+    // consecutive buffer addresses and the write pointer advanced by two, so
+    // the activation buffer held 1,1,2,2,3,3,4,4 instead of 1..8. The array
+    // then computed a confident, fast, WRONG dot product.
+    //
+    // This is the same failure as the PCPI one-shot bug in dot4_pcpi.v
+    // (docs/DECISIONS.md D008), from the same root cause: a master holding a
+    // request asserted for longer than the slave's response pulse. A sticky
+    // "already served" flag, cleared only when the master finally drops
+    // valid, makes the accept unambiguous regardless of how long valid holds.
+    reg        bus_served;
+    wire       bus_accept = mem_valid && !bus_served;
+    wire       is_write = bus_accept && (mem_wstrb != 4'b0000);
+    wire       is_read  = bus_accept && (mem_wstrb == 4'b0000);
+
+    always @(posedge clk) begin
+        if (!resetn)            bus_served <= 1'b0;
+        else if (!mem_valid)    bus_served <= 1'b0;
+        else if (bus_accept)    bus_served <= 1'b1;
+    end
 
     //-----------------------------------------------------------------------
     // Control / status registers
@@ -155,6 +182,42 @@ module accel_top #(
     endgenerate
 
     //-----------------------------------------------------------------------
+    // Pipeline alignment -- operands arrive one cycle after the address
+    //-----------------------------------------------------------------------
+    // The buffers are SYNCHRONOUS: accel_ctrl registers a read address in
+    // cycle t, the buffer presents that data in cycle t+1. But the FSM also
+    // registers arr_en in cycle t, so without correction the array would
+    // accumulate in the very cycle the address is being presented -- one step
+    // ahead of its own data. It would then multiply whatever the buffer held
+    // from the PREVIOUS access and drop the final element of every reduction.
+    //
+    // Delaying the array's control signals by exactly one cycle lines them up
+    // with the data. res_push is delayed with them, because otherwise the
+    // finished tile would be captured into the FIFO one cycle before the last
+    // accumulate actually lands.
+    //
+    // This is the classic synchronous-memory off-by-one. It does not hang, it
+    // does not warn, and it produces a confident wrong answer.
+    reg arr_clr_q, arr_en_q, res_push_q;
+    reg [15:0] res_tile_i_q, res_tile_j_q;
+
+    always @(posedge clk) begin
+        if (!resetn) begin
+            arr_clr_q    <= 1'b0;
+            arr_en_q     <= 1'b0;
+            res_push_q   <= 1'b0;
+            res_tile_i_q <= 16'd0;
+            res_tile_j_q <= 16'd0;
+        end else begin
+            arr_clr_q    <= arr_clr;
+            arr_en_q     <= arr_en;
+            res_push_q   <= res_push;
+            res_tile_i_q <= res_tile_i;
+            res_tile_j_q <= res_tile_j;
+        end
+    end
+
+    //-----------------------------------------------------------------------
     // The array
     //-----------------------------------------------------------------------
     wire [ARRAY_H*ARRAY_W*`ACCEL_ACC_W-1:0] acc_flat;
@@ -165,11 +228,22 @@ module accel_top #(
         .ACC_W(`ACCEL_ACC_W), .PRECISION(PRECISION)
     ) u_array (
         .clk(clk), .resetn(resetn),
-        .clr(arr_clr), .en(arr_en),
+        .clr(arr_clr_q), .en(arr_en_q),
         .a_in(a_bus), .b_in(b_bus),
         .acc_flat(acc_flat),
         .macs_this_cycle(macs_cycle)
     );
+
+`ifdef ACCEL_TRACE
+    // Debug only: show the operands the array actually consumes each step.
+    always @(posedge clk) begin
+        if (resetn && arr_en_q)
+            $display("[trace] MAC step: a_lane0=%0d b_lane0=%0d b_lane1=%0d b_lane2=%0d b_lane3=%0d",
+                     $signed(a_bus[7:0]), $signed(b_bus[7:0]),
+                     $signed(b_bus[15:8]), $signed(b_bus[23:16]),
+                     $signed(b_bus[31:24]));
+    end
+`endif
 
     //-----------------------------------------------------------------------
     // The sequencer
@@ -222,7 +296,7 @@ module accel_top #(
     reg [FIFO_AW:0]    fifo_wp, fifo_rp;
     wire               fifo_empty = (fifo_wp == fifo_rp);
 
-    wire res_pop = is_read && (reg_sel == `ACCEL_REG_RESULT) && !fifo_empty && !mem_ready;
+    wire res_pop = is_read && (reg_sel == `ACCEL_REG_RESULT) && !fifo_empty;
 
     integer fi;
     always @(posedge clk) begin
@@ -234,7 +308,7 @@ module accel_top #(
             // would be a multi-cycle drain; doing it in one keeps the model
             // simple and does not affect the MAC-cycle accounting, which is
             // what the experiment measures.
-            if (res_push) begin
+            if (res_push_q) begin
                 for (fi = 0; fi < TILE_ELEMS; fi = fi + 1)
                     fifo[(fifo_wp + fi[FIFO_AW:0]) % FIFO_DEPTH] <=
                         acc_flat[fi*`ACCEL_ACC_W +: `ACCEL_ACC_W];
@@ -273,7 +347,7 @@ module accel_top #(
             // two polls. Cleared when STATUS is read.
             if (ctrl_done) done_latch <= 1'b1;
 
-            if (mem_valid && !mem_ready) begin
+            if (bus_accept) begin
                 mem_ready <= 1'b1;
 
                 if (is_write) begin
@@ -310,6 +384,15 @@ module accel_top #(
                         `ACCEL_REG_CYCLES: mem_rdata <= p_cycles;
                         `ACCEL_REG_STALLS: mem_rdata <= p_stalls;
                         `ACCEL_REG_MACS:   mem_rdata <= p_macs;
+                        // Software cannot know which geometry was built --
+                        // the sweep changes it per configuration. Without
+                        // this the firmware would have to be recompiled per
+                        // RTL config, and a mismatch would silently compute
+                        // the wrong thing rather than failing.
+                        `ACCEL_REG_CONFIG: mem_rdata <= {8'd4,
+                                                         PRECISION[7:0],
+                                                         ARRAY_W[7:0],
+                                                         ARRAY_H[7:0]};
                         default:           mem_rdata <= 32'd0;
                     endcase
                 end
@@ -320,6 +403,6 @@ module accel_top #(
     // Keep the extra activation tap and fill counters from being optimised
     // away; they are read by testbenches and reported in the sweep metadata.
     wire _unused = &{1'b0, abuf_rdata2, wbuf_fill, abuf_fill, p_active,
-                     res_tile_i, res_tile_j, 1'b0};
+                     res_tile_i_q, res_tile_j_q, 1'b0};
 
 endmodule

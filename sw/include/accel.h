@@ -118,6 +118,7 @@ static inline uint32_t load4(const int8_t *p)
 #define ACCEL_REG_CYCLES  (*(volatile uint32_t *)(ACCEL_BASE + 0x50))
 #define ACCEL_REG_STALLS  (*(volatile uint32_t *)(ACCEL_BASE + 0x54))
 #define ACCEL_REG_MACS    (*(volatile uint32_t *)(ACCEL_BASE + 0x58))
+#define ACCEL_REG_CONFIG  (*(volatile uint32_t *)(ACCEL_BASE + 0x5C))
 
 /* CTRL bits */
 #define ACCEL_CTRL_START      0x1u
@@ -169,5 +170,28 @@ static inline void accel_clear_perf(void) { ACCEL_REG_CTRL = ACCEL_CTRL_CLEAR_PE
 static inline uint32_t accel_cycles(void) { return ACCEL_REG_CYCLES; }
 static inline uint32_t accel_stalls(void) { return ACCEL_REG_STALLS; }
 static inline uint32_t accel_macs(void)   { return ACCEL_REG_MACS; }
+
+/* Discover the geometry that was actually synthesised.
+ *
+ * The sweep builds many array shapes from one firmware image, so the software
+ * must ADAPT rather than assume. Hardcoding 4x4 here would silently compute
+ * the wrong answer on every other configuration -- the worst kind of bug,
+ * because it still produces a plausible number. */
+static inline uint32_t accel_array_h(void) { return  ACCEL_REG_CONFIG        & 0xFF; }
+static inline uint32_t accel_array_w(void) { return (ACCEL_REG_CONFIG >>  8) & 0xFF; }
+static inline uint32_t accel_precision(void) { return (ACCEL_REG_CONFIG >> 16) & 0xFF; }
+
+/* How many DISTINCT outputs one pass can produce.
+ *
+ * accel_top.v fans a 32-bit buffer word out to the array as lane (j % 4), so
+ * columns 4..7 of an 8-wide array see the same four lanes as columns 0..3.
+ * Only min(ARRAY_W, 4) columns are therefore independent. This is a real
+ * limitation of the 32-bit operand path, documented in docs/REVIEW.md, and it
+ * means an 8-wide build does NOT double throughput under this mapping. */
+static inline uint32_t accel_lanes(void)
+{
+    const uint32_t w = accel_array_w();
+    return (w < 4u) ? w : 4u;
+}
 
 #endif /* ACCEL_H */

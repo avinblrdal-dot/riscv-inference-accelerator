@@ -13,10 +13,16 @@ A general-purpose processor is built for branching, unpredictable code. Neural
 network inference is the opposite: one arithmetic pattern — multiply-accumulate
 — repeated millions of times with almost no branching.
 
-Running inference on a plain RISC-V core spends roughly **8–10 instructions of
-overhead for every single useful multiply-add**. That overhead is *structural*,
-not a compiler deficiency: the instruction set has no way to express "do four
-of these at once", so it cannot be optimised away, only architected away.
+Running inference on a plain RISC-V core is far more expensive than it looks.
+We **measured** it: **143 instructions and 708 cycles per useful
+multiply-add** on an rv32i core.
+
+The reason is that rv32i has *no multiply instruction at all*. Every `a * b`
+becomes a call into a libgcc software routine, and a convolution's address
+arithmetic (`ox*stride`, `iy*in_w`, `ky*kw`) adds three more multiplies per
+inner iteration. The overhead is *structural*, not a compiler deficiency: the
+instruction set cannot express "do four of these at once", so it cannot be
+optimised away — only architected away.
 
 This matters because energy per inference determines whether a battery-powered
 sensor can run unattended for years, which determines cost per deployed node,
@@ -67,6 +73,69 @@ sensor bolted to a pump cannot be recharged.
 Blocked on: Nordic PPK2 (energy), Vivado install (area/timing), Arty A7-100T
 (both), MIMII/CWRU datasets (accuracy). All tracked in
 [DECISIONS.md](docs/DECISIONS.md) under `TODO_BLOCKED`.
+
+### RQ1 — answered (MEASURED, cycle-accurate simulation)
+
+Baseline firmware, workload A, one inference:
+
+| Quantity | Value |
+|---|---|
+| Total cycles | 263,729,703 |
+| Cycles in MAC loops | 262,349,024 |
+| **MAC fraction** | **99.48%** |
+| **Amdahl ceiling** | **191×** |
+| IPC | 0.202 (5.0 cycles/instruction) |
+| Cycles per MAC | 708 |
+| Time at 100 MHz | 2.64 s per inference |
+
+**99.48% of cycles are MAC work**, so the theoretical ceiling for *any*
+accelerator on this workload is 191×. That is an unusually favourable Amdahl
+position, and it is a direct consequence of rv32i having no hardware multiply.
+
+The firmware's predicted class matched the Python reference's golden vector
+exactly — the compiled C on the simulated core agrees with the reference
+implementation.
+
+Cycle counts are exact (simulation is deterministic) and remain valid despite
+the model's synthetic weights, because control flow in these kernels depends
+only on tensor shapes, never on weight values.
+
+### RQ2 — answered (MEASURED)
+
+All three variants produce the **same, correct** classification (class 2,
+matching the golden vector), so these are like-for-like comparisons:
+
+| Variant | Cycles | Speedup |
+|---|---|---|
+| baseline | 263,729,703 | 1.00× |
+| `dot4` | 270,269,701 | **0.98× — slower than baseline** |
+| MAC array | 60,453,159 | **4.36×** |
+
+**`dot4` does not help this workload.** A 4-wide SIMD instruction needs four
+*contiguous* elements, and a 3×3 convolution kernel has only three per row. So
+98.9% of the MACs get no benefit, while the wider code path costs a little
+extra. This was predicted in `sw/src/nn_dot4.c` before it was measured, and it
+is the direct motivation for the array's im2col approach.
+
+**The array achieves 4.36× — but that is only 2.3% of the 191× ceiling.**
+The reason is the interesting part:
+
+| | |
+|---|---|
+| Accelerator busy | 109,632 cycles |
+| Total | 60,453,159 cycles |
+| **Array utilisation** | **0.18%** |
+| Array internal stalls | **0** |
+
+The array is **idle 99.8% of the time and never stalls internally.** The
+bottleneck is not the compute array, and not its local buffers — it is the CPU
+packing operands and pushing them one 32-bit word at a time over the memory
+bus.
+
+That is a strong early signal for RQ3, and it reframes the question: the
+binding constraint on this design is the **CPU-to-accelerator interface**
+(DMA, burst transfers, a wider bus), not the array width or buffer depth the
+sweep was built to vary. See [EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md).
 
 ### What *is* verified today
 

@@ -161,6 +161,34 @@ mis-specified and would miss the same effect in the real sweep.
 
 ---
 
+## UPDATE — RQ3 needs reframing (measured 2026-08-29)
+
+With the array variant working correctly, the accelerator is **idle 99.8% of
+the time and records zero internal stalls**. The CPU spends essentially all of
+its time packing operands and pushing them one 32-bit word at a time.
+
+RQ3 as posed asks whether local buffering (`wbuf_depth`) reduces stalls more
+than added compute (`array_w`). **Stalls are already zero**, so that factor is
+inert and the interaction cannot be observed at this level.
+
+The hypothesis is not wrong, but it was aimed at the wrong interface. Data
+movement *does* dominate — just one level up, between the CPU and the
+accelerator, rather than between the buffers and the array.
+
+**Recommended revision, to decide before collecting sweep data:**
+- keep `array_w` and `precision` as factors;
+- replace `wbuf_depth` with a factor that actually varies the bottleneck —
+  operand transfer width, burst length, or DMA present/absent;
+- report the current finding (0.18% utilisation) as the evidence motivating
+  the change.
+
+Changing the design *after* seeing data is legitimate only if it is declared.
+This section is that declaration. The original RQ3 formulation and the
+measurement that motivated the change are both recorded, so nothing is
+retrofitted silently.
+
+---
+
 ## Threats to validity
 
 **Internal**

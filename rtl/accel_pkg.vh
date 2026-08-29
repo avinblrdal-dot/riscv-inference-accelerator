@@ -102,6 +102,10 @@
 `define ACCEL_REG_CYCLES       8'h50  // R : perf counter -- total cycles
 `define ACCEL_REG_STALLS       8'h54  // R : perf counter -- data-starved cycles
 `define ACCEL_REG_MACS         8'h58  // R : perf counter -- useful MACs issued
+`define ACCEL_REG_CONFIG       8'h5C  // R : built geometry, so software can
+                                      //     adapt to the synthesised array:
+                                      //     [7:0]=ARRAY_H [15:8]=ARRAY_W
+                                      //     [23:16]=PRECISION [31:24]=LANES
 
 //---------------------------------------------------------------------------
 // Requantization constants

@@ -53,7 +53,13 @@ module soc_top #(
     parameter WBUF_DEPTH    = 256,
     parameter ABUF_DEPTH    = 256,
     parameter PRECISION     = 8,
-    parameter FIRMWARE_HEX  = "firmware.hex"  // loaded by $readmemh in sim
+    // Path is relative to the directory the simulator is RUN from, which for
+    // every runner in this repo is the repository root. It defaults to the
+    // canonical location rather than a bare filename because Verilator uses
+    // soc_top as its top module directly -- there is no testbench above it to
+    // override the parameter, so a bare "firmware.hex" silently failed to
+    // load and the CPU executed uninitialised memory.
+    parameter FIRMWARE_HEX  = "sim/build/firmware.hex"
 ) (
     input  wire clk,
     input  wire resetn,

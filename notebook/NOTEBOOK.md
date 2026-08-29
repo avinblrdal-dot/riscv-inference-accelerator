@@ -9,6 +9,74 @@ section matters most.
 
 ---
 
+## 2026-08-29 (later) — RQ1 measured; Verilator makes the sweep feasible
+
+**Who:** project session
+
+**Goal:** Cross-compile the firmware for the first time and measure the
+baseline MAC-loop fraction (RQ1).
+
+**What I did:**
+- Installed Homebrew, Verilator 5.050, and a prebuilt RISC-V toolchain
+  (xPack `riscv-none-elf-gcc` 15.2.0 into `~/.local` — no admin rights, which
+  matters because this account is not in sudoers).
+- Cross-compiled all three firmware variants for the first time (gap G2).
+- Wrote a Verilator C++ testbench (`sim/verilator/tb_soc.cpp`) and extended
+  `sim/run_verilator.sh` with `build` and `sim` modes.
+- Ran the baseline inference to completion.
+
+**Results / numbers:** (MEASURED — cycle-accurate simulation, exact)
+
+| Quantity | Value |
+|---|---|
+| cycles_total | 263,729,703 |
+| cycles_mac | 262,349,024 |
+| instructions retired | 53,201,238 |
+| **MAC fraction** | **99.48%** |
+| **Amdahl ceiling** | **191x** |
+| IPC | 0.202 (5.0 cycles/instruction) |
+| cycles per MAC | 708 |
+| instructions per MAC | 143 |
+| time at 100 MHz | 2.64 s per inference |
+
+Predicted class was **2**, which **matches the golden vector** from the Python
+reference. The compiled C running on the simulated RISC-V core agrees with the
+reference implementation — full-model agreement on hardware, not just in a
+host build.
+
+Simulator speed: Verilator ran 263M cycles in **17 seconds** (15.5M cycles/s).
+Icarus reached only 240M cycles in **over an hour** (~64k cycles/s). A **~240x
+speedup**.
+
+**What broke / open questions:**
+- The README claimed "6-10 instructions of overhead per MAC". Measurement says
+  **143 instructions and 708 cycles per MAC** — far worse. Cause: rv32i has
+  *no multiply instruction at all*, so every `a * b` calls libgcc's
+  `__mulsi3`, and the convolution's address arithmetic (`ox*stride`,
+  `iy*in_w`, `ky*kw`) adds three more multiplies per inner iteration. The 6-10
+  figure would describe a core that *has* hardware multiply. README corrected.
+- First cross-compile failed three ways, all real: `__global_pointer$`
+  referenced in `start.S` but never defined in `link.ld`; `-nostdlib`
+  excluding libgcc so every `__mulsi3` was undefined; and a 32 KB `scratch`
+  array all three variants ignore, which blew the RAM budget. The last was
+  caught by the `ASSERT` in `link.ld` at build time rather than as runtime
+  corruption — the guard earned its keep.
+- `tb_soc.v`'s timeout was an `integer` (32-bit signed). A 4e9 ns value
+  wrapped **negative**, silently disabling the timeout — exactly the failure
+  the timeout exists to catch. Now `time` (64-bit).
+- Verilator found a documentation comment that had become a compiler
+  directive: any comment whose first word is `verilator` is parsed as a
+  pragma, including `//` comments.
+- Validity note: the weights are synthetic, but the **cycle counts are still
+  valid**. Control flow in these kernels depends only on tensor shapes, never
+  on weight values, so timing is data-independent. Accuracy from this model
+  remains meaningless; timing does not.
+
+**Next step:** Wire Verilator into `sweep/run_sweep.py`. At Icarus speed the
+64-configuration sweep would take months; at Verilator speed, minutes. Then
+measure the `dot4` and `array` variants against this baseline.
+
+---
 ## 2026-08-29 — Repository foundation built and verified
 
 **Who:** project setup session
