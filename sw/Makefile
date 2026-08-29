@@ -29,6 +29,7 @@ CROSS ?= $(firstword $(foreach p, \
 CC      := $(CROSS)gcc
 OBJCOPY := $(CROSS)objcopy
 OBJDUMP := $(CROSS)objdump
+SIZE    := $(CROSS)size
 
 BUILD := build
 SRC   := src
@@ -47,7 +48,27 @@ ARCH_FLAGS := -march=rv32i -mabi=ilp32
 CFLAGS  := $(ARCH_FLAGS) -O2 -Wall -Wextra -Werror \
            -ffreestanding -nostdlib -fno-builtin \
            -fomit-frame-pointer -I$(INC) -I$(MODELS)
-LDFLAGS := $(ARCH_FLAGS) -nostdlib -T link.ld -Wl,--gc-sections
+LDFLAGS := $(ARCH_FLAGS) -nostdlib -T link.ld -Wl,--gc-sections \
+           -Wl,--no-warn-rwx-segments
+
+# libgcc, and why it is REQUIRED rather than optional.
+#
+# rv32i has no multiply or divide instruction. So when the C says `a * b`,
+# GCC cannot emit a single instruction -- it emits a CALL to a software
+# routine in libgcc (__mulsi3, __divsi3, __muldi3, __udivdi3). `-nostdlib`
+# excludes libgcc along with libc, which is why the first link failed with a
+# wall of undefined references to those names.
+#
+# This is not an annoyance to work around; it IS the phenomenon this project
+# measures. Every multiply in the inference loop is a function call: save
+# registers, jump, shift-and-add loop, return. That is a large part of the
+# 8-10 instructions of overhead per useful multiply-add that motivates the
+# whole accelerator.
+#
+# We link libgcc explicitly, and ONLY libgcc -- still no libc, no startup
+# files, no heap. Note it must come AFTER the object files on the command
+# line, because the linker resolves symbols left to right.
+LDLIBS := -lgcc
 
 COMMON_SRCS := $(SRC)/quant.c $(SRC)/nn_baseline.c
 VARIANT_SRCS := $(SRC)/nn_dot4.c $(SRC)/nn_array.c
@@ -80,7 +101,8 @@ $(BUILD):
 define BUILD_VARIANT
 $(BUILD)/$(1).elf: check-toolchain | $(BUILD)
 	$$(CC) $$(CFLAGS) -DVARIANT_BUILD_$(2) $$(LDFLAGS) \
-	  start.S $$(COMMON_SRCS) $$(VARIANT_SRCS) $(SRC)/main.c -o $$@
+	  start.S $$(COMMON_SRCS) $$(VARIANT_SRCS) $(SRC)/main.c \
+	  $$(LDLIBS) -o $$@
 	@echo "  built $$@"
 
 $(BUILD)/$(1).hex: $(BUILD)/$(1).elf
@@ -91,7 +113,12 @@ $(BUILD)/$(1).lst: $(BUILD)/$(1).elf
 	$$(OBJDUMP) -d -S $$< > $$@
 
 $(1): $(BUILD)/$(1).hex $(BUILD)/$(1).lst
-	@$$(OBJDUMP) -h $$(BUILD)/$(1).elf | awk '/\.text|\.rodata|\.bss/ {printf "  %-10s %s bytes\n", $$$$2, strtonum("0x" $$$$3)}'
+	@# Use the toolchain's own `size` rather than parsing objdump with awk.
+	@# strtonum() is a GNU awk extension that macOS's BSD awk does not have,
+	@# so the awk version failed on a Mac while working fine on Linux.
+	@$$(SIZE) -A -d $$(BUILD)/$(1).elf 2>/dev/null | \
+	  awk '/^\.text|^\.rodata|^\.data|^\.bss/ {printf "  %-10s %8d bytes\n", $$$$1, $$$$2} \
+	       /^Total/ {printf "  %-10s %8d bytes\n", "TOTAL", $$$$2}'
 endef
 
 $(eval $(call BUILD_VARIANT,baseline,BASELINE))

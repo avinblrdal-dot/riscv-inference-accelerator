@@ -85,10 +85,21 @@ static void report(const char *label, int32_t value)
  *-------------------------------------------------------------------------*/
 /* Static, not stack: link.ld gives us only 4 KB of stack, and these are far
  * larger than that. Two buffers are enough because layers alternate between
- * them (ping-pong), which halves peak memory versus one buffer per layer. */
-static int8_t  buf_a[MODEL_MAX_TENSOR];
-static int8_t  buf_b[MODEL_MAX_TENSOR];
-static int32_t scratch[MODEL_MAX_TENSOR];
+ * them (ping-pong), which halves peak memory versus one buffer per layer.
+ *
+ * NOTE ON THE MISSING `scratch` ARRAY.
+ * The layer kernels take a `scratch` pointer, as a hook for a future variant
+ * that needs somewhere to land int32 accumulators. No current variant uses it
+ * -- all three do `(void)scratch`. An earlier version of this file allocated
+ * `int32_t scratch[MODEL_MAX_TENSOR]`, which at 4 bytes per element was
+ * 32 KB: half the entire 64 KB RAM, reserved for something nothing read.
+ * That pushed the image over budget and the ASSERT in link.ld caught it at
+ * build time. We pass NULL instead. If a variant ever genuinely needs
+ * scratch space, allocate exactly what that variant needs and re-check the
+ * memory budget in docs/ARCHITECTURE.md section 8. */
+static int8_t buf_a[MODEL_MAX_TENSOR];
+static int8_t buf_b[MODEL_MAX_TENSOR];
+#define SCRATCH_UNUSED ((int32_t *)0)
 
 /* Declared in nn_dot4.c / nn_array.c. */
 void nn_fc_dot4(const int8_t *in, const nn_fc_t *layer, int8_t *out);
@@ -132,11 +143,11 @@ static int32_t run_inference(variant_t variant, const int8_t *input,
             int32_t oh, ow;
             t0 = perf_cycles();
             if (variant == VARIANT_DOT4)
-                nn_conv2d_dot4(cur, h, w, &L->conv, nxt, &oh, &ow, scratch);
+                nn_conv2d_dot4(cur, h, w, &L->conv, nxt, &oh, &ow, SCRATCH_UNUSED);
             else if (variant == VARIANT_ARRAY)
-                nn_conv2d_array(cur, h, w, &L->conv, nxt, &oh, &ow, scratch);
+                nn_conv2d_array(cur, h, w, &L->conv, nxt, &oh, &ow, SCRATCH_UNUSED);
             else
-                nn_conv2d(cur, h, w, &L->conv, nxt, &oh, &ow, scratch);
+                nn_conv2d(cur, h, w, &L->conv, nxt, &oh, &ow, SCRATCH_UNUSED);
             layer_cycles += perf_cycles() - t0;
             h = oh; w = ow;
             { int8_t *tmp = cur; cur = nxt; nxt = tmp; }

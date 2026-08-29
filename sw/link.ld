@@ -60,6 +60,12 @@ SECTIONS
     } > RAM
 
     /* ---- Initialised data -------------------------------------------- */
+    /* __global_pointer$ must be DEFINED here, not just referenced.
+     * start.S loads it into gp so the compiler can reach small globals with a
+     * single instruction instead of two. The +0x800 offset centres gp in the
+     * 4 KB signed range a 12-bit immediate can address, so it covers 0x800
+     * bytes either side. Omitting this definition gives an 'undefined
+     * reference to __global_pointer$' at link time. */
     /* On a system that boots from flash, .data would have to be COPIED from
      * flash to RAM at startup. Here code and data share one RAM that is
      * preloaded by $readmemh, so no copy is needed -- start.S deliberately
@@ -68,6 +74,8 @@ SECTIONS
     .data : {
         *(.data)
         *(.data.*)
+        __SDATA_BEGIN__ = .;
+        PROVIDE(__global_pointer$ = . + 0x800);
         *(.sdata)
         *(.sdata.*)
         . = ALIGN(4);

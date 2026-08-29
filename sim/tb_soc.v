@@ -41,7 +41,12 @@ module tb_soc;
     parameter CLK_NS       = 10;                 // 100 MHz
     parameter BIT_NS       = CLKS_PER_BIT * CLK_NS;
     parameter MEM_WORDS    = 16384;
-    parameter TIMEOUT_NS   = 20_000_000;
+    // Generous, because a full baseline inference is genuinely enormous:
+    // ~372k MACs, each an __mulsi3 software-multiply call on rv32i, at ~4
+    // cycles per instruction. That is tens of millions of cycles. The smoke
+    // tests finish in microseconds; the real firmware does not.
+    // Override for a quick run:  vvp tb_soc.vvp +timeout_ns=20000000
+    parameter TIMEOUT_NS   = 4_000_000_000;
 
     reg  clk = 0;
     reg  resetn = 0;
@@ -124,8 +129,14 @@ module tb_soc;
         end
     end
 
+    integer timeout_ns;
     initial begin
-        #TIMEOUT_NS;
+        timeout_ns = TIMEOUT_NS;
+        // $value$plusargs returns 1 if the argument was present. Verilog-2001
+        // has no void cast, so test it in an if rather than discarding it.
+        if ($value$plusargs("timeout_ns=%d", timeout_ns))
+            $display("[tb_soc] timeout overridden to %0d ns", timeout_ns);
+        #timeout_ns;
         $display("");
         $display("TEST FAILED -- timeout after %0d characters of output.", n_chars);
         $display("  A hang usually means an unmapped memory access (look for");
