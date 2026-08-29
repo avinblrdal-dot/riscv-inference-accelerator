@@ -129,19 +129,49 @@ module tb_soc;
         end
     end
 
-    integer timeout_ns;
+    // MUST be `time` (64-bit), not `integer` (32-bit signed).
+    // TIMEOUT_NS of 4e9 exceeds 2^31-1 and silently wrapped NEGATIVE when
+    // held in an integer, which disabled the timeout entirely and let a hung
+    // run spin forever with no diagnostic -- the exact failure the timeout
+    // exists to prevent.
+    time timeout_ns;
     initial begin
         timeout_ns = TIMEOUT_NS;
         // $value$plusargs returns 1 if the argument was present. Verilog-2001
         // has no void cast, so test it in an if rather than discarding it.
         if ($value$plusargs("timeout_ns=%d", timeout_ns))
-            $display("[tb_soc] timeout overridden to %0d ns", timeout_ns);
+            $display("[tb_soc] timeout overridden to %0t ns", timeout_ns);
         #timeout_ns;
         $display("");
         $display("TEST FAILED -- timeout after %0d characters of output.", n_chars);
         $display("  A hang usually means an unmapped memory access (look for");
         $display("  the [soc] WARNING lines) or a firmware infinite loop.");
         $finish;
+    end
+
+    // Progress heartbeat. A cycle-accurate inference is tens of millions of
+    // cycles and takes minutes of wall time; without this there is no way to
+    // tell "slow but working" from "hung", and they demand opposite responses.
+    // Counted with a cheap comparison, NOT a modulo. `cyc % 5_000_000` on a
+    // 64-bit value evaluated every clock edge is genuinely expensive in an
+    // interpreted simulator -- it measurably slowed the run it was meant to
+    // observe. A plain equality test against a reload counter costs nothing.
+    reg [63:0] cyc  = 0;
+    reg [31:0] tick = 0;
+    always @(posedge clk) begin
+        cyc <= cyc + 1;
+        if (tick == 32'd4_999_999) begin
+            tick <= 0;
+            // $fflush is REQUIRED. When stdout is a file rather than a
+            // terminal it is block-buffered, so without this a long run looks
+            // completely silent for minutes and is indistinguishable from a
+            // hang -- which is precisely what this heartbeat exists to rule
+            // out. The UART receiver below flushes for the same reason.
+            $display("[tb_soc] ... %0d M cycles", (cyc + 1) / 1_000_000);
+            $fflush();
+        end else begin
+            tick <= tick + 1;
+        end
     end
 
     initial begin
