@@ -1,0 +1,91 @@
+# ===========================================================================
+# Workload A -- machine fault classifier          *** FROZEN ARTIFACT ***
+# ===========================================================================
+#
+# THIS FILE IS FROZEN. Once train/freeze.py has recorded its hash, changing
+# any value here invalidates every measurement taken against it. freeze.py
+# will refuse to overwrite an existing manifest, and any script that loads a
+# frozen config verifies the hash and stops if it has drifted.
+#
+# If you genuinely need different settings, create a NEW config file with a
+# new name. Do not edit this one. The whole point of freezing is that a number
+# in the paper can be traced to an exact, unambiguous model.
+#
+# Why this architecture: it must fit in the 64 KB of on-chip RAM the SoC has
+# (see rtl/soc_top.v MEM_WORDS and sw/link.ld), leaving room for activations
+# and the stack. That budget is what caps the parameter count, not accuracy
+# ambition.
+# ===========================================================================
+
+name: workload_a_fault_classifier
+description: >
+  Four-class machine condition classifier over log-mel spectrograms of
+  motor/pump acoustic data. The primary workload -- chosen because a sensor
+  bolted to a pump cannot be recharged, so its energy constraint is the
+  binding one.
+
+task: classification
+
+classes:
+  - normal
+  - imbalance
+  - misalignment
+  - bearing_fault
+
+# --- input representation --------------------------------------------------
+input:
+  kind: log_mel_spectrogram
+  sample_rate_hz: 16000
+  n_fft: 1024
+  hop_length: 512
+  n_mels: 32
+  n_frames: 32          # 32 x 32 -> a square input, convenient for tiling
+  channels: 1
+  # Log-mel rather than raw waveform: bearing faults show up as narrowband
+  # tones and sidebands, which a spectrogram makes linearly separable and a
+  # raw waveform does not. It also cuts the input size by ~100x, which
+  # matters when the whole model must fit in 64 KB.
+
+# --- model -----------------------------------------------------------------
+model:
+  architecture: small_cnn
+  layers:
+    - {type: conv, out_ch: 8,  kernel: 3, stride: 1, pad: 1}
+    - {type: relu}
+    - {type: maxpool, k: 2}
+    - {type: conv, out_ch: 16, kernel: 3, stride: 1, pad: 1}
+    - {type: relu}
+    - {type: maxpool, k: 2}
+    - {type: fc, out_dim: 4}
+  # Parameter budget: conv1 8*1*9=72, conv2 16*8*9=1152, fc 16*8*8*4=4096
+  # Total ~5.3k weights -> ~5.3 KB as int8. Comfortably inside budget.
+  max_parameters: 15000
+
+# --- quantization ----------------------------------------------------------
+quantization:
+  scheme: symmetric_per_tensor
+  # Symmetric (zero_point = 0) so integer zero means float zero exactly.
+  # That matters because padding and ReLU outputs are exactly zero, and an
+  # asymmetric scheme would turn every one of them into a small nonzero
+  # number that then propagates through the network.
+  weight_precision: 8
+  activation_precision: 8
+  calibration_samples: 256
+  rounding: half_away_from_zero   # must match quant_ref / quant.c / requantize.v
+
+# --- training --------------------------------------------------------------
+training:
+  epochs: 60
+  batch_size: 64
+  learning_rate: 0.001
+  optimizer: adam
+  weight_decay: 0.0001
+  seed: 20260828          # recorded in every artifact for reproducibility
+  val_split: 0.2
+  early_stopping_patience: 10
+
+# --- dataset ---------------------------------------------------------------
+dataset:
+  primary: mimii
+  secondary: cwru_bearing
+  cache_dir: data/cache

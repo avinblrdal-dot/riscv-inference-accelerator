@@ -1,0 +1,118 @@
+# ===========================================================================
+# Workload B -- FFT autoencoder anomaly detector   *** FROZEN ARTIFACT ***
+# ===========================================================================
+#
+# THIS FILE IS FROZEN -- see the header of workload_a.yaml.
+#
+# WHY AN AUTOENCODER AND NOT A SECOND CNN
+# ---------------------------------------
+# RQ5 asks whether the accelerator's gains GENERALIZE. That question is only
+# meaningful if workload B is structurally different from workload A. Two CNNs
+# over spectrograms would share their layer types, their data layout and their
+# arithmetic intensity -- so "it generalizes" would mean almost nothing.
+#
+# This model:
+#   * has NO convolutions at all -- only fully-connected layers
+#   * takes raw FFT magnitude bins, not a 2-D spectrogram
+#   * is trained unsupervised on normal data only, and flags anomalies by
+#     reconstruction error rather than by classifying
+#
+# That gives a genuinely different arithmetic profile. Fully-connected layers
+# have long contiguous reductions and low data reuse, whereas convolutions
+# have short reductions and high reuse. If the accelerator helps both, the
+# generality claim means something.
+#
+# The alternative considered was keyword spotting on Speech Commands. It was
+# rejected as the default because it shares a spectrogram front end with
+# workload A and is therefore a WEAKER test of generality. See
+# docs/DECISIONS.md.
+# ===========================================================================
+
+name: workload_b_fft_autoencoder
+description: >
+  Fully-connected autoencoder anomaly detector over FFT magnitude features.
+  Structurally different from workload A by design -- no convolutions, no
+  2-D data, unsupervised objective -- so that RQ5's generality claim is a
+  real test rather than a restatement.
+
+task: anomaly_detection
+
+# --- input representation --------------------------------------------------
+input:
+  kind: fft_magnitude
+  sample_rate_hz: 16000
+  n_fft: 1024
+  hop_length: 512
+  n_bins: 128           # first 128 bins: 0 - 2 kHz, where bearing faults live
+  n_frames_stacked: 4   # 4 consecutive frames -> 512-dim input vector
+  channels: 1
+
+# --- model -----------------------------------------------------------------
+model:
+  architecture: fc_autoencoder
+  layers:
+    - {type: fc, out_dim: 128}
+    - {type: relu}
+    - {type: fc, out_dim: 32}    # the bottleneck
+    - {type: relu}
+    - {type: fc, out_dim: 128}
+    - {type: relu}
+    - {type: fc, out_dim: 512}   # reconstruct the input
+  # 512*128 + 128*32 + 32*128 + 128*512 = 139,264 weights.
+  # NOTE: that EXCEEDS the 64 KB on-chip RAM as int8. See docs/DECISIONS.md
+  # entry "Workload B size"; the deployed variant uses the reduced dims below
+  # and the full one is kept for accuracy reference on the host only.
+  max_parameters: 150000
+
+# Dimensions actually built into firmware, sized to fit on-chip alongside
+# workload A's activations and the stack.
+deployed_model:
+  layers:
+    - {type: fc, out_dim: 32}
+    - {type: relu}
+    - {type: fc, out_dim: 8}
+    - {type: relu}
+    - {type: fc, out_dim: 32}
+    - {type: relu}
+    - {type: fc, out_dim: 128}
+  input_dim: 128
+  # 128*32 + 32*8 + 8*32 + 32*128 = 8,832 weights -> ~8.8 KB as int8.
+
+# --- anomaly decision ------------------------------------------------------
+detection:
+  metric: mean_absolute_reconstruction_error
+  # Threshold is CALIBRATED on held-out normal data, not guessed. Set to the
+  # given percentile of normal-data error, so the false-positive rate is
+  # controlled by construction.
+  threshold_percentile: 99.0
+  # MAE rather than MSE: squaring in int32 risks overflow on a 512-dim vector
+  # and would need another requantization step, adding a third place for the
+  # three implementations to disagree.
+
+# --- quantization ----------------------------------------------------------
+quantization:
+  scheme: symmetric_per_tensor
+  weight_precision: 8
+  activation_precision: 8
+  calibration_samples: 256
+  rounding: half_away_from_zero
+
+# --- training --------------------------------------------------------------
+training:
+  epochs: 100
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: adam
+  weight_decay: 0.0
+  seed: 20260828
+  val_split: 0.2
+  early_stopping_patience: 15
+  # Trained ONLY on normal samples -- that is what makes it an anomaly
+  # detector rather than a classifier.
+  train_on_normal_only: true
+
+# --- dataset ---------------------------------------------------------------
+dataset:
+  primary: mimii
+  secondary: cwru_bearing
+  cache_dir: data/cache

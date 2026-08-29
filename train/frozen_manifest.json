@@ -1,0 +1,16 @@
+{
+  "workload_a_fault_classifier": {
+    "config_path": "train/config/workload_a.yaml",
+    "config_sha256": "52cb2f2157da9a54d1f229233d87eddf11f667d957d9c0b4520808fdcef40a62",
+    "frozen_utc": "2026-08-29T04:58:21Z",
+    "git_sha": "d596d00a321eb30fa3ce57bcace84d80e169aad9-dirty",
+    "seed": 20260828
+  },
+  "workload_b_fft_autoencoder": {
+    "config_path": "train/config/workload_b.yaml",
+    "config_sha256": "0b8b5f3ac5ee2ce7d00309759fb394b4235a9a742d697d2a05851033535110ec",
+    "frozen_utc": "2026-08-29T04:58:21Z",
+    "git_sha": "d596d00a321eb30fa3ce57bcace84d80e169aad9-dirty",
+    "seed": 20260828
+  }
+}

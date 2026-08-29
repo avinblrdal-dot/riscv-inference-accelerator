@@ -35,7 +35,7 @@
 #define NN_QMAX(p) ((1 << ((p) - 1)) - 1)
 
 /* Per-layer quantization parameters, produced offline by train/quantize.py
- * and emitted into sw/models/*.h. */
+ * and emitted into the generated header in sw/models/. */
 typedef struct {
     int32_t multiplier;  /* M0, normalized into [2^30, 2^31) */
     int32_t shift;       /* total right shift, = 31 + n      */
