@@ -137,6 +137,44 @@ binding constraint on this design is the **CPU-to-accelerator interface**
 (DMA, burst transfers, a wider bus), not the array width or buffer depth the
 sweep was built to vary. See [EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md).
 
+### RQ3 — swept and answered (MEASURED; all 16 configurations verified correct)
+
+Cycles per inference, workload A, int8. Every cell was checked against the
+golden classification before being recorded.
+
+| Array | buf 16 | buf 64 | buf 256 | buf 1024 | Buffer gain |
+|---|---|---|---|---|---|
+| 1×1 | 96.5M | 92.4M | 85.7M | 85.7M | 11.1% |
+| 2×2 | 75.6M | 72.9M | 62.9M | 62.9M | 16.8% |
+| 4×4 | 64.3M | 61.7M | **52.1M** | 52.1M | 19.1% |
+| 8×8 | 75.6M | 68.4M | 57.6M | 57.6M | 23.8% |
+
+**Best configuration: 4×4 array, 256-word buffer — 5.07× over baseline.**
+
+Three findings:
+
+1. **Array width has an optimum, not a monotone trend.** 8×8 is *worse* than
+   4×4. The 32-bit operand path fans out as lane `j mod 4`, so only four
+   columns are ever independent — an 8-wide array adds no parallelism but
+   forces the CPU to drain 64 FIFO entries per tile instead of 16. More
+   compute made it slower.
+2. **Buffer depth saturates at the layer's working set.** conv2's tile is 72
+   words, so 256 helps and 1024 adds nothing. The saturation point *is* the
+   working set, which is a clean and interpretable result.
+3. **The interaction is real but small.** Buffer gain rises monotonically with
+   width (11.1% → 23.8%, roughly doubling). But on log-cycles it explains only
+   **1.7% of variance**, against main effects of 77% (width) and 21% (depth).
+
+**By our pre-registered criterion (partial η² ≥ 0.06), RQ3's interaction
+hypothesis is NOT SUPPORTED.** The direction is exactly as predicted and the
+trend is monotone, but the magnitude is far below the threshold we committed
+to in advance. Buffer depth and array width both matter a great deal, and they
+act largely *independently*.
+
+We are reporting that as stated rather than lowering the threshold after
+seeing the data. The pre-registration in
+[EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md) exists for exactly this moment.
+
 ### What *is* verified today
 
 These are real, reproducible, and checkable from a clean clone:

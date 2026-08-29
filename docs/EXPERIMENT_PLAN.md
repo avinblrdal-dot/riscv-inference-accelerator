@@ -161,31 +161,38 @@ mis-specified and would miss the same effect in the real sweep.
 
 ---
 
-## UPDATE — RQ3 needs reframing (measured 2026-08-29)
+## UPDATE — RQ3 confirmed testable (2026-08-29)
 
-With the array variant working correctly, the accelerator is **idle 99.8% of
-the time and records zero internal stalls**. The CPU spends essentially all of
-its time packing operands and pushing them one 32-bit word at a time.
+An earlier revision of this section proposed abandoning `wbuf_depth` as a
+factor, on the evidence that the accelerator was idle 99.8% of the time and
+recorded zero stalls. **That conclusion was wrong and is retracted here.**
 
-RQ3 as posed asks whether local buffering (`wbuf_depth`) reduces stalls more
-than added compute (`array_w`). **Stalls are already zero**, so that factor is
-inert and the interaction cannot be observed at this level.
+The cause was a software defect, not a flaw in the hypothesis: the convolution
+loops re-pushed identical weights at every spatial position, so the buffer was
+never actually reused (see [DECISIONS.md D017](DECISIONS.md)). With the loops
+inverted, buffer depth becomes causal and measurable:
 
-The hypothesis is not wrong, but it was aimed at the wrong interface. Data
-movement *does* dominate — just one level up, between the CPU and the
-accelerator, rather than between the buffers and the array.
+| `wbuf_depth` | Cycles | Correct? |
+|---|---|---|
+| 0 | 63,540,912 | **no — class 0 vs golden 2** |
+| 16 / 64 | 61,563,051 | yes |
+| 256 | 52,050,811 | yes |
+| 1024 | 52,050,811 | yes |
 
-**Recommended revision, to decide before collecting sweep data:**
-- keep `array_w` and `precision` as factors;
-- replace `wbuf_depth` with a factor that actually varies the bottleneck —
-  operand transfer width, burst length, or DMA present/absent;
-- report the current finding (0.18% utilisation) as the evidence motivating
-  the change.
+64 → 256 gives a 15% reduction and then saturates, because conv2's tile needs
+72 words. **The saturation point is the layer's working set**, which is a
+clean and interpretable result.
 
-Changing the design *after* seeing data is legitimate only if it is declared.
-This section is that declaration. The original RQ3 formulation and the
-measurement that motivated the change are both recorded, so nothing is
-retrofitted silently.
+Two changes follow, both recorded before any sweep data was collected:
+1. The control level is 16 rather than 0, because depth 0 cannot compute a
+   correct result ([D016](DECISIONS.md)).
+2. Every sweep row records whether the configuration produced the correct
+   classification. A configuration that is fast and wrong must never be
+   reported as fast.
+
+The methodological lesson is worth stating plainly: **a null result from a
+factor means nothing until you have verified the implementation lets that
+factor operate.**
 
 ---
 

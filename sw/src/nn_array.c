@@ -65,12 +65,28 @@
  * hang with no output at all. */
 #define ACCEL_POLL_LIMIT 4000000u
 
-/* Largest reduction length pushed in one pass. Must not exceed the smaller of
- * WBUF_DEPTH and ABUF_DEPTH, or the buffer write pointer wraps and quietly
- * corrupts the tile. 64 is the smallest nonzero depth in the sweep, so this
- * is safe for every configuration including the DEPTH=0 control case (which
- * bypasses storage entirely and is unaffected by depth). */
-#define ACCEL_KTILE 64
+/* Largest reduction length pushed in one pass.
+ *
+ * This MUST NOT exceed the smaller of the synthesised WBUF_DEPTH and
+ * ABUF_DEPTH, or the buffer write pointer wraps and silently corrupts the
+ * tile. It was originally a hardcoded 64, on the assumption that 64 was the
+ * smallest depth in the sweep. When the control level changed to 16, that
+ * assumption quietly became false and every 16-word configuration computed
+ * the wrong answer -- caught only because the sweep checks each result
+ * against the golden class.
+ *
+ * Deriving it from the hardware at run time removes the assumption entirely. */
+#define ACCEL_KTILE_MAX 64
+
+static int32_t accel_ktile(void)
+{
+    uint32_t w = accel_wbuf_words();
+    uint32_t a = accel_abuf_words();
+    uint32_t m = (w < a) ? w : a;
+    if (m == 0u) return ACCEL_KTILE_MAX;   /* depth 0: no storage to overrun */
+    if (m > (uint32_t)ACCEL_KTILE_MAX) m = (uint32_t)ACCEL_KTILE_MAX;
+    return (int32_t)m;
+}
 
 /* Receptive field scratch for im2col. Static, not stack: link.ld gives only
  * 4 KB of stack. */
@@ -100,12 +116,13 @@ static void accel_dot_group(const int8_t *in,
                             int32_t len,
                             int32_t *acc)
 {
+    const int32_t ktile = accel_ktile();
     int32_t k0;
 
-    for (k0 = 0; k0 < len; k0 += ACCEL_KTILE) {
+    for (k0 = 0; k0 < len; k0 += ktile) {
         int32_t klen = len - k0;
         int32_t k;
-        if (klen > ACCEL_KTILE) klen = ACCEL_KTILE;
+        if (klen > ktile) klen = ktile;
 
         /* Rewind the buffer write pointers. Without this each tile appends
          * after the previous one and runs off the end of the buffer. */
@@ -207,18 +224,48 @@ void nn_fc_array(const int8_t *in, const nn_fc_t *layer, int8_t *out)
 }
 
 /*---------------------------------------------------------------------------
- * nn_conv2d_array -- convolution via im2col, one output position at a time
+ * nn_conv2d_array -- convolution via im2col, EXPLOITING WEIGHT REUSE
  *-------------------------------------------------------------------------*
  *
- * A convolution's sliding window is not contiguous in memory, which is what
- * stopped the DOT4 instruction from helping (see nn_dot4.c). Unfolding one
- * receptive field into a contiguous vector turns the problem into exactly the
- * fully-connected case above, with in_dim = in_ch * kh * kw -- a long
- * reduction, which is what the array wants.
+ * THE LOOP ORDER IS THE POINT. Read this before changing it.
  *
- * We unfold ONE position at a time rather than the whole layer. Full im2col
- * would expand the image by roughly kh*kw, and with 64 KB of RAM that does
- * not fit.
+ * A convolution applies the SAME weights at every spatial position. conv2 in
+ * workload A has 16 output channels over a 16x16 output, so each weight is
+ * reused 256 times. Exploiting that is the entire reason a weight buffer
+ * exists, and it is what research question RQ3 is about.
+ *
+ * An earlier version of this file had the loops the wrong way round:
+ *
+ *     for each output position:            <- outer
+ *         for each group of 4 channels:    <- inner
+ *             push weights AND activations, run
+ *
+ * That re-pushed the identical weights at every position: 73,728 weight
+ * transfers for conv2 where only 1,152 distinct values exist -- a 64x
+ * redundancy, and 256x for conv1. The buffer was present but never reused, so
+ * the CPU spent all its time re-sending data the accelerator already had. The
+ * accelerator sat idle 99.8% of the time and buffer depth had no measurable
+ * effect, which made it look as though RQ3's hypothesis was wrong. It was the
+ * software that was wrong.
+ *
+ * Inverted, weights load once per channel group and every position streams
+ * past them:
+ *
+ *     for each group of 4 output channels:      <- outer
+ *         load that group's weights ONCE
+ *         for each output position:             <- inner
+ *             im2col, push activations only, run
+ *
+ * WHEN REUSE IS POSSIBLE
+ *   Only if the group's weights FIT in the weight buffer, i.e.
+ *   patch_len <= accel_wbuf_words(). Capacity is read from the hardware at run
+ *   time, so the decision tracks whatever was synthesised. With a depth of 0
+ *   (the control case) or a buffer too small for the layer, reuse is
+ *   impossible and we fall back to reloading per position.
+ *
+ *   That fallback is not a defect -- it is exactly the effect RQ3 predicts.
+ *   A buffer too small to hold a tile buys nothing, and the sweep should show
+ *   that as a real, measurable difference between depths.
  */
 void nn_conv2d_array(const int8_t *in, int32_t in_h, int32_t in_w,
                      const nn_conv_t *layer, int8_t *out,
@@ -235,14 +282,17 @@ void nn_conv2d_array(const int8_t *in, int32_t in_h, int32_t in_w,
     const int32_t oh = (in_h + 2 * pad - kh) / stride + 1;
     const int32_t ow = (in_w + 2 * pad - kw) / stride + 1;
 
-    int32_t oy, ox, oc, ic, ky, kx, j;
+    /* Can a whole channel group's weights stay resident while every position
+     * streams past? Decided from the hardware's real capacity. */
+    const int32_t wbuf_words = (int32_t)accel_wbuf_words();
+    const int32_t can_reuse  = (patch_len > 0) && (patch_len <= wbuf_words);
+
+    int32_t oc0, oy, ox, ic, ky, kx, j, k;
 
     *out_h = oh;
     *out_w = ow;
 
     if (patch_len > MAX_PATCH) {
-        /* Fail predictably rather than smashing memory. Zeros are obviously
-         * wrong downstream, which is the intent. */
         int32_t i;
         g_accel_timeouts++;
         for (i = 0; i < out_ch * oh * ow; i++) out[i] = 0;
@@ -251,47 +301,83 @@ void nn_conv2d_array(const int8_t *in, int32_t in_h, int32_t in_w,
 
     accel_clear_perf();
 
-    for (oy = 0; oy < oh; oy++) {
-        for (ox = 0; ox < ow; ox++) {
+    for (oc0 = 0; oc0 < out_ch; oc0 += lanes_max) {
+        const int8_t *w_rows[4];
+        int32_t lanes = out_ch - oc0;
+        if (lanes > lanes_max) lanes = lanes_max;
 
-            /* ---- im2col for ONE output position ---------------------- */
-            int32_t p = 0;
-            for (ic = 0; ic < in_ch; ic++) {
-                const int8_t *x_ic = in + (int32_t)ic * in_h * in_w;
-                for (ky = 0; ky < kh; ky++) {
-                    const int32_t iy = oy * stride + ky - pad;
-                    for (kx = 0; kx < kw; kx++) {
-                        const int32_t ix = ox * stride + kx - pad;
-                        /* Outside the image contributes zero. Exact under
-                         * symmetric quantization. */
-                        patch_buf[p++] = (iy < 0 || iy >= in_h ||
-                                          ix < 0 || ix >= in_w)
-                                         ? 0 : x_ic[iy * in_w + ix];
+        for (j = 0; j < 4; j++) {
+            w_rows[j] = (j < lanes)
+                ? layer->weights + (int32_t)(oc0 + j) * patch_len
+                : layer->weights;
+        }
+
+        /* ---- load this group's weights ONCE, if they fit --------------- */
+        if (can_reuse) {
+            ACCEL_REG_CTRL = ACCEL_CTRL_RST_WBUF;
+            for (k = 0; k < patch_len; k++) {
+                accel_push_weight(pack4(
+                    (lanes > 0) ? w_rows[0][k] : 0,
+                    (lanes > 1) ? w_rows[1][k] : 0,
+                    (lanes > 2) ? w_rows[2][k] : 0,
+                    (lanes > 3) ? w_rows[3][k] : 0));
+            }
+        }
+
+        for (oy = 0; oy < oh; oy++) {
+            for (ox = 0; ox < ow; ox++) {
+                int32_t acc[4];
+                int32_t p = 0;
+
+                /* ---- im2col for one output position -------------------- */
+                for (ic = 0; ic < in_ch; ic++) {
+                    const int8_t *x_ic = in + (int32_t)ic * in_h * in_w;
+                    for (ky = 0; ky < kh; ky++) {
+                        const int32_t iy = oy * stride + ky - pad;
+                        for (kx = 0; kx < kw; kx++) {
+                            const int32_t ix = ox * stride + kx - pad;
+                            patch_buf[p++] = (iy < 0 || iy >= in_h ||
+                                              ix < 0 || ix >= in_w)
+                                             ? 0 : x_ic[iy * in_w + ix];
+                        }
                     }
                 }
-            }
 
-            /* ---- the unfolded window is now a fully-connected layer --- */
-            for (oc = 0; oc < out_ch; oc += lanes_max) {
-                const int8_t *w_rows[4];
-                int32_t acc[4];
-                int32_t lanes = out_ch - oc;
+                for (j = 0; j < 4; j++) acc[j] = 0;
 
-                if (lanes > lanes_max) lanes = lanes_max;
+                if (can_reuse) {
+                    /* Weights are already resident. Rewind ONLY the
+                     * activation pointer and push this position's patch. */
+                    ACCEL_REG_CTRL = ACCEL_CTRL_RST_ABUF;
+                    for (k = 0; k < patch_len; k++) {
+                        accel_push_activation(pack4(patch_buf[k], 0, 0, 0));
+                    }
 
-                for (j = 0; j < 4; j++) {
-                    acc[j] = 0;
-                    w_rows[j] = (j < lanes)
-                        ? layer->weights + (int32_t)(oc + j) * patch_len
-                        : layer->weights;
+                    accel_set_dims(1u, (uint32_t)lanes, (uint32_t)patch_len);
+                    accel_start();
+
+                    if (accel_wait_done(ACCEL_POLL_LIMIT) != 0) {
+                        g_accel_timeouts++;
+                    } else {
+                        const int32_t tile_elems =
+                            (int32_t)(accel_array_h() * accel_array_w());
+                        int32_t e;
+                        for (e = 0; e < tile_elems; e++) {
+                            const int32_t v = accel_pop_result();
+                            if (e < lanes) acc[e] += v;
+                        }
+                    }
+                } else {
+                    /* No reuse possible: reload weights with every position.
+                     * This is the control behaviour, and its cost is the
+                     * measurement RQ3 wants. */
+                    accel_dot_group(patch_buf, w_rows, lanes, patch_len, acc);
                 }
-
-                accel_dot_group(patch_buf, w_rows, lanes, patch_len, acc);
 
                 for (j = 0; j < lanes; j++) {
                     const int32_t biased =
-                        acc[j] + (layer->bias ? layer->bias[oc + j] : 0);
-                    out[((oc + j) * oh + oy) * ow + ox] =
+                        acc[j] + (layer->bias ? layer->bias[oc0 + j] : 0);
+                    out[((oc0 + j) * oh + oy) * ow + ox] =
                         (int8_t)nn_requantize(biased,
                                               layer->qp.multiplier,
                                               layer->qp.shift,

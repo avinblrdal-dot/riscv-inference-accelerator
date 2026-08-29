@@ -17,10 +17,20 @@ factors:
   # scalar baseline that still uses the array datapath.
   array_w: [1, 2, 4, 8]
 
-  # Local buffer depth in 32-bit words. 0 is the CONTROL CASE: no local
-  # storage, every operand re-fetched from main memory. It must be included
-  # or there is nothing to compare buffering against.
-  wbuf_depth: [0, 64, 256, 1024]
+  # Local buffer depth in 32-bit words.
+  #
+  # The control level is 16, NOT 0. Depth 0 builds a buffer with no storage at
+  # all, so reads return whatever happens to be on the write data bus. It
+  # models the BANDWIDTH cost of having no local memory, but it cannot compute
+  # a correct result -- verified: it returns class 0 against a golden class 2.
+  # Sweeping it would mix a functionally broken configuration into the results.
+  #
+  # 16 is the smallest depth that still works, so it is a fair control: a real
+  # accelerator with minimal buffering. See docs/DECISIONS.md D016.
+  #
+  # The interesting threshold is the layer working set: conv2 needs 72 words,
+  # so 16 and 64 cannot hold a tile while 256 and 1024 can.
+  wbuf_depth: [16, 64, 256, 1024]
 
   # Weight/activation precision. RQ4.
   precision: [8, 4]

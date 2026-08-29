@@ -9,6 +9,66 @@ section matters most.
 
 ---
 
+## 2026-08-29 (evening) — Array variant fixed; full sweep run; RQ3 answered
+
+**Who:** project session
+
+**Goal:** Run the design-space sweep.
+
+**What I did:** Ran the `dot4` and `array` firmware for the first time before
+wiring the sweep. The array was 5.1x faster and **produced the wrong answer**
+(class 1 vs golden 2) — gap G1 landing exactly as the review predicted. Fixed
+it, then found the sweep's premise was also broken, fixed that, then swept.
+
+**Bugs found and fixed (all silent, none caught by existing tests):**
+1. **Double bus accept** — `mem_ready` is a one-cycle pulse but the CPU holds
+   `mem_valid` longer, so every operand was written to two addresses. Same
+   root cause as the earlier PCPI bug (D008). This is the project's
+   characteristic failure mode.
+2. **Synchronous-memory off-by-one** — array enabled one cycle before its data
+   arrived.
+3. **Operand contract mismatch** — software packed 4 consecutive elements per
+   word; the array wants one value per lane across 4 channels. Three quarters
+   of the data was discarded.
+4. **Loop order defeated the weight buffer** — weights re-pushed at every
+   spatial position (64x redundancy on conv2). This made buffer depth look
+   inert and nearly caused me to abandon RQ3 as untestable. **The hypothesis
+   was fine; my software defeated it.**
+5. **k-tile overran small buffers** — hardcoded 64 against a 16-word buffer.
+   Caught only because the sweep checks every result against golden.
+
+**Results (all 16 configurations verified correct):**
+
+| Array | buf 16 | buf 64 | buf 256 | buf 1024 | gain |
+|---|---|---|---|---|---|
+| 1x1 | 96.5M | 92.4M | 85.7M | 85.7M | 11.1% |
+| 2x2 | 75.6M | 72.9M | 62.9M | 62.9M | 16.8% |
+| 4x4 | 64.3M | 61.7M | **52.1M** | 52.1M | 19.1% |
+| 8x8 | 75.6M | 68.4M | 57.6M | 57.6M | 23.8% |
+
+Best: 4x4 with a 256-word buffer, **5.07x** over the 263.7M-cycle baseline.
+
+**RQ3 verdict: NOT SUPPORTED by the pre-registered criterion.** The
+interaction is directionally right and monotone (gain doubles from 11.1% to
+23.8%), but explains only 1.7% of variance in log-cycles against main effects
+of 77% and 21%. Reporting as stated; not moving the threshold after the fact.
+
+**What broke / open questions:**
+- 8x8 is SLOWER than 4x4. Only 4 columns are independent (32-bit fan-out), so
+  a wider array adds no parallelism but forces draining 64 FIFO entries per
+  tile instead of 16. **More compute made it slower** — a good result.
+- ANOVA on raw cycles showed the interaction at 0.8%; on log-cycles 1.7%.
+  Performance effects are multiplicative, so log is the correct scale. Noted
+  in `analysis/anova.py`.
+- The array is still busy only ~0.2% of the time. The CPU pushing operands
+  one word at a time dominates everything. DMA or burst transfer is the
+  obvious next lever.
+- `precision` could not be swept: the exported model is int8, so int4
+  hardware would mis-decode it. RQ4 needs an int4 model export first.
+
+**Next step:** int4 model export for RQ4; workload B firmware for RQ5.
+
+---
 ## 2026-08-29 (later) — RQ1 measured; Verilator makes the sweep feasible
 
 **Who:** project session

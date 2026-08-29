@@ -56,19 +56,87 @@ def setup(plt):
     })
 
 
-def provenance(fig, source: str, synthetic: bool, proxy: bool) -> None:
-    """Stamp every figure with where its numbers came from."""
+def provenance(fig, source: str, synthetic: bool, proxy: bool,
+               measured_axis: bool = True) -> None:
+    """Stamp every figure with where its numbers came from.
+
+    The distinction matters and used to be drawn too bluntly. When the model's
+    weights are synthetic, ACCURACY is meaningless -- but CYCLE COUNTS are
+    still real measurements, because control flow in these kernels depends
+    only on tensor shapes, never on weight values. Stamping a cycles figure
+    "SYNTHETIC DATA - NOT A RESULT" understated a genuine measurement just as
+    badly as the opposite error would have overstated one.
+    """
     bits = [f"source: {os.path.basename(source)}"]
-    if synthetic:
+    warn = False
+    if measured_axis:
+        bits.append("cycle counts MEASURED (cycle-accurate simulation)")
+        if synthetic:
+            bits.append("model weights synthetic - accuracy NOT meaningful")
+    elif synthetic:
         bits.append("SYNTHETIC DATA - NOT A RESULT")
+        warn = True
     if proxy:
         bits.append("energy axis is a PROXY, not measured")
+        warn = True
     fig.text(0.005, 0.005, "  |  ".join(bits), fontsize=6.5,
-             color="#B00020" if (synthetic or proxy) else "#666666",
+             color="#B00020" if warn else "#555555",
              ha="left", va="bottom")
 
 
-def fig_stall_interaction(plt, aggs, out, source, synthetic, precision=8):
+def fig_rq3_interaction(plt, aggs, out, source, synthetic, precision=8):
+    """THE RQ3 FIGURE: cycles vs array width, one line per buffer depth.
+
+    Plotted on a LOG y-axis, because performance effects are multiplicative:
+    each factor contributes a speedup FACTOR, and on a log scale a
+    multiplicative interaction appears as non-parallel lines. On a linear axis
+    the same data looks parallel and the interaction is invisible.
+
+    An earlier version plotted stall fraction, which was the right measure
+    when the array was starving. With operand reuse working, the array never
+    stalls (stall fraction is 0 everywhere), so cycles is the informative
+    response.
+    """
+    fig, ax = plt.subplots(figsize=(6.8, 4.4))
+    sel = [a for a in aggs if int(a.get("precision", precision)) == precision] or aggs
+    depths = sorted({int(a["wbuf_depth"]) for a in sel})
+    widths = sorted({int(a["array_w"]) for a in sel})
+
+    for i, d in enumerate(depths):
+        xs, ys = [], []
+        for w in widths:
+            pts = [a for a in sel
+                   if int(a["array_w"]) == w and int(a["wbuf_depth"]) == d
+                   and isinstance(a.get("cycles_total"), (int, float))]
+            if not pts:
+                continue
+            xs.append(w)
+            ys.append(sum(p["cycles_total"] for p in pts) / len(pts) / 1e6)
+        if xs:
+            ax.plot(xs, ys, marker=MARKERS[i % len(MARKERS)],
+                    color=OKABE_ITO[i % len(OKABE_ITO)],
+                    linewidth=1.9, markersize=7,
+                    label=f"buffer {d} words")
+
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xticks(widths)
+    ax.set_xticklabels([str(w) for w in widths])
+    ax.get_yaxis().set_major_formatter(
+        __import__("matplotlib").ticker.ScalarFormatter())
+    ax.set_xlabel("MAC array width (cells per side)")
+    ax.set_ylabel("Cycles per inference (millions)")
+    ax.set_title("RQ3: buffer depth vs array width\n"
+                 f"(int{precision}; log axes -- non-parallel lines = interaction)")
+    ax.legend(title="local weight buffer", fontsize=9)
+    provenance(fig, source, synthetic, False, measured_axis=True)
+    path = os.path.join(out, "rq3_interaction.png")
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def fig_stall_interaction_unused(plt, aggs, out, source, synthetic, precision=8):
     """THE RQ3 FIGURE: stall fraction vs array width, one line per buffer depth.
 
     This is the single most important plot in the project. Non-parallel lines
@@ -217,7 +285,7 @@ def fig_pareto(plt, aggs, out, source, synthetic, using_proxy):
     ax.set_ylabel("Classification accuracy (%)")
     ax.set_title("Energy / accuracy trade-off\nlarge outlined markers are Pareto optimal")
     ax.legend(fontsize=8.5, loc="lower right")
-    provenance(fig, source, synthetic, using_proxy)
+    provenance(fig, source, synthetic, using_proxy, measured_axis=False)
     path = os.path.join(out, "pareto_energy_accuracy.png")
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
@@ -307,11 +375,19 @@ def main() -> int:
     os.makedirs(args.out_dir, exist_ok=True)
 
     made = [
-        fig_stall_interaction(plt, aggs, args.out_dir, args.csv, synthetic),
+        fig_rq3_interaction(plt, aggs, args.out_dir, args.csv, synthetic),
         fig_cycles_vs_width(plt, aggs, args.out_dir, args.csv, synthetic),
-        fig_pareto(plt, aggs, args.out_dir, args.csv, synthetic, using_proxy),
-        fig_area(plt, aggs, args.out_dir, args.csv, synthetic),
     ]
+    # Accuracy and area come from a trained model and from Vivado. Skip those
+    # figures rather than drawing empty axes when the data does not exist.
+    if any(isinstance(a.get("accuracy"), (int, float)) for a in aggs) and \
+       any(isinstance(a.get("luts"), (int, float)) for a in aggs):
+        made.append(fig_pareto(plt, aggs, args.out_dir, args.csv, synthetic,
+                               using_proxy))
+        made.append(fig_area(plt, aggs, args.out_dir, args.csv, synthetic))
+    else:
+        print("  (skipping Pareto and area figures -- no accuracy/synthesis"
+              " data yet)")
 
     print("Wrote:")
     for p in made:

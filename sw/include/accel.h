@@ -119,11 +119,14 @@ static inline uint32_t load4(const int8_t *p)
 #define ACCEL_REG_STALLS  (*(volatile uint32_t *)(ACCEL_BASE + 0x54))
 #define ACCEL_REG_MACS    (*(volatile uint32_t *)(ACCEL_BASE + 0x58))
 #define ACCEL_REG_CONFIG  (*(volatile uint32_t *)(ACCEL_BASE + 0x5C))
+#define ACCEL_REG_BUFCAP  (*(volatile uint32_t *)(ACCEL_BASE + 0x60))
 
 /* CTRL bits */
 #define ACCEL_CTRL_START      0x1u
 #define ACCEL_CTRL_SOFT_RESET 0x2u
 #define ACCEL_CTRL_CLEAR_PERF 0x4u
+#define ACCEL_CTRL_RST_WBUF   0x8u   /* rewind weight pointer only     */
+#define ACCEL_CTRL_RST_ABUF   0x10u  /* rewind activation pointer only */
 
 /* STATUS bits */
 #define ACCEL_STATUS_BUSY     0x1u
@@ -188,6 +191,17 @@ static inline uint32_t accel_precision(void) { return (ACCEL_REG_CONFIG >> 16) &
  * Only min(ARRAY_W, 4) columns are therefore independent. This is a real
  * limitation of the 32-bit operand path, documented in docs/REVIEW.md, and it
  * means an 8-wide build does NOT double throughput under this mapping. */
+/* Buffer capacity in 32-bit words, as actually synthesised.
+ *
+ * Software uses this to decide whether a layer's weights FIT. If they do, they
+ * are loaded once and reused across every output position; if they do not,
+ * they must be reloaded per position and the buffer buys nothing. That
+ * decision is the mechanism RQ3 is about, so it must follow the real
+ * hardware rather than an assumption. A depth of 0 (the control case) means
+ * no reuse is ever possible. */
+static inline uint32_t accel_wbuf_words(void) { return  ACCEL_REG_BUFCAP        & 0xFFFFu; }
+static inline uint32_t accel_abuf_words(void) { return (ACCEL_REG_BUFCAP >> 16) & 0xFFFFu; }
+
 static inline uint32_t accel_lanes(void)
 {
     const uint32_t w = accel_array_w();

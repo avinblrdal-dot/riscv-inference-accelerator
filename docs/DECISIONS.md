@@ -307,6 +307,51 @@ does **not** double throughput under this mapping.
 
 ---
 
+## D016 — The buffer control level is 16, not 0
+
+**Decision.** `sweep_config.yaml` sweeps `wbuf_depth` over `[16, 64, 256,
+1024]`. Depth 0 remains supported in the RTL but is excluded from the sweep.
+
+**Why.** Depth 0 builds a buffer with no storage: reads return `bypass_data`,
+whatever is on the write bus at that moment. It faithfully models the
+*bandwidth* cost of having no local memory — and it is the only configuration
+that records nonzero stalls (93,184) — but it **cannot compute a correct
+result.** Measured: it returns class 0 against a golden class 2.
+
+Including a functionally broken configuration in a results table would mean
+reporting cycle counts for a machine that does not work. Depth 16 is the
+smallest depth that computes correctly, so it is a fair minimal-buffering
+control.
+
+**Related finding.** Buffer depth has a real, explicable effect once the
+software actually reuses weights (see D017): 64 → 256 gives a 15% cycle
+reduction and then saturates, because conv2's tile needs 72 words. The
+saturation point *is* the layer's working set, which is a clean result.
+
+---
+
+## D017 — Loop order determines whether the weight buffer does anything
+
+**Decision.** `nn_conv2d_array` iterates output-channel groups on the OUTSIDE
+and spatial positions on the inside, loading each group's weights once.
+
+**Why.** A convolution applies the same weights at every position — 256 times
+for conv2. The original loop order re-pushed identical weights at every
+position: 73,728 transfers where 1,152 distinct values exist, a 64x
+redundancy (256x for conv1). The buffer was present but never reused.
+
+The consequence was badly misleading. The accelerator sat idle 99.8% of the
+time, buffer depth had no measurable effect, and it looked as though RQ3's
+hypothesis was wrong. **The hypothesis was fine; the software defeated it.**
+Inverting the loops made buffer depth causal — which is what makes RQ3
+testable at all.
+
+Worth remembering as a general caution: a null result from a factor is only
+meaningful once you have checked that the implementation actually lets that
+factor operate.
+
+---
+
 ## TODO_BLOCKED items
 
 These could not be completed and are **not** worked around with invented data.

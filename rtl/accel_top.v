@@ -355,11 +355,19 @@ module accel_top #(
                         `ACCEL_REG_CTRL: begin
                             if (mem_wdata[0]) start_pulse <= 1'b1;
                             if (mem_wdata[1]) begin
-                                // soft reset: rewind the buffer write
-                                // pointers so the next layer starts clean
+                                // Rewind BOTH write pointers.
                                 wbuf_wptr <= 16'd0;
                                 abuf_wptr <= 16'd0;
                             end
+                            // Independent rewinds. These exist so software can
+                            // refill activations for a new output position
+                            // WITHOUT evicting weights that are still resident
+                            // and still valid. Without them, every activation
+                            // refill would force a weight reload too, which
+                            // defeats the buffer entirely -- the buffer would
+                            // be present but never actually reused.
+                            if (mem_wdata[3]) wbuf_wptr <= 16'd0;
+                            if (mem_wdata[4]) abuf_wptr <= 16'd0;
                             if (mem_wdata[2]) perf_clear <= 1'b1;
                         end
                         `ACCEL_REG_M:    dim_m <= mem_wdata[15:0];
@@ -389,6 +397,8 @@ module accel_top #(
                         // this the firmware would have to be recompiled per
                         // RTL config, and a mismatch would silently compute
                         // the wrong thing rather than failing.
+                        `ACCEL_REG_BUFCAP: mem_rdata <= {ABUF_DEPTH[15:0],
+                                                         WBUF_DEPTH[15:0]};
                         `ACCEL_REG_CONFIG: mem_rdata <= {8'd4,
                                                          PRECISION[7:0],
                                                          ARRAY_W[7:0],
