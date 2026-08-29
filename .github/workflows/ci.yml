@@ -1,0 +1,158 @@
+# ===========================================================================
+# CI -- runs on every push and pull request.
+#
+# The job that matters is `parity`. If bit-exactness breaks, a hardware bug
+# becomes indistinguishable from numerical drift and nothing this project
+# measures can be trusted. It runs first and everything else depends on it.
+#
+# Deliberately does NOT install PyTorch or Vivado: the entire verification
+# path is designed to work without them, and CI is the proof of that claim.
+# ===========================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  parity:
+    name: Bit-exactness (Python == C == Verilog)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - name: Install Python dependencies
+        # numpy only. If this ever needs more, the "runs anywhere" property
+        # of the parity harness has been lost and should be restored.
+        run: pip install numpy
+
+      - name: Show tool versions
+        run: |
+          iverilog -V | head -1
+          cc --version | head -1
+          python3 -c "import numpy; print('numpy', numpy.__version__)"
+
+      - name: Verify bit-exactness
+        run: python3 train/verify_parity.py
+
+  simulation:
+    name: RTL simulation
+    runs-on: ubuntu-latest
+    needs: parity
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+
+      - name: Run all testbenches
+        run: ./sim/run_icarus.sh
+
+      - name: Check parameter propagation
+        # A silently-defaulted parameter would make the whole sweep produce a
+        # flat line that looks like "the factors do not matter". Build several
+        # geometries and confirm each reports the shape it was asked for.
+        run: |
+          set -e
+          for geo in "1 1" "2 2" "8 8"; do
+            H=$(echo $geo | cut -d' ' -f1); W=$(echo $geo | cut -d' ' -f2)
+            iverilog -g2005 -Irtl -Ptb_mac_array.H=$H -Ptb_mac_array.W=$W \
+              -o /tmp/tb_geo.vvp sim/tb_mac_array.v rtl/mac_array.v rtl/mac_unit.v
+            out=$(vvp /tmp/tb_geo.vvp)
+            echo "$out" | grep -q "built ${H}x${W}" \
+              || { echo "PARAMETER DID NOT PROPAGATE for ${H}x${W}"; exit 1; }
+            echo "$out" | grep -q "TEST PASSED" \
+              || { echo "FAILED at ${H}x${W}"; exit 1; }
+            echo "  ${H}x${W} OK"
+          done
+
+  software:
+    name: Host build + full-model parity
+    runs-on: ubuntu-latest
+    needs: parity
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: sudo apt-get update && sudo apt-get install -y iverilog
+      - run: pip install numpy
+
+      - name: Host build (-Wall -Wextra -Werror)
+        run: make -C sw host
+
+      - name: Generate model artifacts
+        run: make weights
+
+      - name: Full-model bit-exactness
+        run: python3 train/verify_parity.py --stage model
+
+  analysis:
+    name: Analysis pipeline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install numpy matplotlib
+
+      - name: Validate the ANOVA against known ground truth
+        # An analysis script never checked against a known answer is not
+        # evidence of anything.
+        run: python3 analysis/anova.py --validate
+
+      - name: Generate synthetic results and run the full analysis
+        run: |
+          python3 analysis/load_results.py --synthetic
+          python3 analysis/pareto.py --csv sweep/results/synthetic_results.csv \
+              --min-accuracy 0.90
+          python3 analysis/plots.py --csv sweep/results/synthetic_results.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: figures
+          path: analysis/figures/*.png
+
+  sweep:
+    name: Sweep dry run
+    runs-on: ubuntu-latest
+    needs: simulation
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: sudo apt-get update && sudo apt-get install -y iverilog
+      - run: pip install numpy
+      - run: python3 sweep/run_sweep.py --dry-run --quick
