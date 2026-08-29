@@ -25,7 +25,7 @@
 //   from the command line at build time:
 //
 //     iverilog -PARRAY_W=4 ...          (Icarus, per-instance)
-//     verilator -GARRAY_W=4 ...         (Verilator)
+//     $ verilator -GARRAY_W=4 ...         (Verilator)
 //     set_property generic {ARRAY_W=4}  (Vivado)
 //
 //   The defaults here are only defaults. Never read a default and assume the

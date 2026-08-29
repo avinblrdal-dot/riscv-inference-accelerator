@@ -447,7 +447,7 @@ Ordered by urgency. Effort estimates assume one student who has read the docs.
 | **G5** | No real training run | High | 2–4 days | Blocked on datasets. Pipeline is verified with synthetic weights. |
 | **G6** | Dataset URLs unverified | High | 0.5 day | `TODO_BLOCKED` TB001. |
 | **G7** | No energy measurements | High | Blocked on PPK2 | All scripts written, never run. Treat first use as bring-up. |
-| **G8** | Verilator lint never run | Medium | 0.5 day | Verilator is much stricter than Icarus and will likely find real width/latch issues. |
+| ~~G8~~ | ~~Verilator lint never run~~ | **CLOSED** | done | Verilator 5.050 now runs clean across all 11 modules. Found and fixed 3 real issues -- see below. |
 | **G9** | Activation scales never calibrated | Medium | 1 day | Currently defaults. `quantize.py` warns. Accuracy is not meaningful until this is done. |
 | **G10** | ESP32-S3 project is a README only | Medium | 2–3 days | Skeleton and fairness requirements documented. |
 | **G11** | Workload B never trained or exported | Medium | 1–2 days | Config frozen; `deployed_model` sized to fit. |
@@ -455,6 +455,49 @@ Ordered by urgency. Effort estimates assume one student who has read the docs.
 | **G13** | No `requirements.lock` | Low | 1 hour | |
 | **G14** | Non-square arrays not swept | Low | 1 hour | RTL supports and is tested at 2×8; excluded to keep the factorial at 64 cells. |
 | **G15** | `int4` buffer packing is capacity-modelled, not bit-packed | Low | 1–2 days | Bandwidth advantage is modelled in `MEM_BEATS`; storage is not physically packed two-per-byte. Note when reporting int4 area. |
+
+---
+
+## Addendum: Verilator lint results (G8, closed)
+
+Run for the first time with Verilator 5.050. It found three genuine issues
+that Icarus tolerates, all now fixed. Recorded because they are a good
+illustration of *why* a second, stricter tool is worth the install.
+
+1. **A documentation comment had become a compiler directive.**
+   `accel_pkg.vh` contained the line `//     verilator -GARRAY_W=4 ...` as
+   part of a comment explaining how to override parameters. Verilator treats
+   any comment whose first word is `verilator` as a pragma -- including `//`
+   line comments -- so this parsed as a malformed directive and hard-errored
+   every lint run. Fixed by prefixing with `$ `. Entirely self-inflicted, and
+   completely invisible to Icarus.
+
+2. **Implicit width extension in the `dot4` adder tree.** The four 16-bit
+   products were summed into a 32-bit result, relying on Verilog's
+   context-determined width rules to widen them. This was *not* a bug -- the
+   `4 x (-128 x -128) = 65536` test case needs 17 bits and passes -- but it
+   depended on one of Verilog's genuinely surprising rules. Now uses the
+   explicit `{{16{p[15]}}, p}` sign-extension idiom, matching the style used
+   elsewhere. The risk it removes is a future refactor introducing a 16-bit
+   intermediate and silently truncating, with data-dependent symptoms.
+
+3. **Mixed-width saturation comparison in `requantize.v`.** The 32-bit
+   `QMIN`/`QMAX` limits were compared against the 64-bit intermediate.
+   Verilog sign-extends correctly here, but this is the one module where a
+   silent width error would corrupt every number the project produces, so the
+   widths are now explicit on both sides.
+
+Also tied off PicoRV32's unused `trace_valid`/`trace_data` ports explicitly,
+so a genuinely missing connection is not lost in PINMISSING noise.
+
+Two warning classes are waived, both in `third_party/picorv32` and neither
+ours to fix: `GENUNNAMED` (a naming-style rule from IEEE 1800-2023) and
+`BLKSEQ` (blocking assignments in clocked blocks, deliberate in that
+codebase). **Our RTL must never trip BLKSEQ** -- if it ever does, remove the
+waiver and fix it, because that is a real bug.
+
+Bit-exactness was re-verified after all three fixes: 10/10 parity stages and
+871 RTL checks still pass.
 
 ---
 

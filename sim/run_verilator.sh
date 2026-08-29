@@ -54,7 +54,15 @@ RTL_SRCS=(
 #   WIDTHTRUNC/WIDTHEXPAND  reviewed case by case; parameter arithmetic in
 #                 generate blocks trips these constantly without being wrong
 #   PINCONNECTEMPTY  unconnected outputs we genuinely do not use
-WAIVERS="-Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY"
+#   GENUNNAMED    unnamed generate blocks inside third_party/picorv32. Not
+#                 our code, and a naming-style rule from IEEE 1800-2023
+#                 rather than a defect.
+#   BLKSEQ        blocking '=' in picorv32's sequential blocks. Deliberate in
+#                 that codebase and not ours to change. OUR RTL must never
+#                 trip this -- if it ever does, remove this waiver and fix it,
+#                 because blocking assignments in clocked logic are a real bug
+#                 (see docs/VERILOG_PRIMER.md section 4).
+WAIVERS="-Wno-DECLFILENAME -Wno-UNUSED -Wno-UNDRIVEN -Wno-PINCONNECTEMPTY -Wno-GENUNNAMED -Wno-BLKSEQ"
 
 lint_one () {
     local top="$1"

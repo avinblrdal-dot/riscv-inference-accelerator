@@ -168,11 +168,33 @@ module dot4_pcpi #(
     wire signed [15:0] p2 = a2 * b2;
     wire signed [15:0] p3 = a3 * b3;
 
-    // The adder tree. Written as a balanced tree ((p0+p1)+(p2+p3)) rather
-    // than a chain (p0+p1+p2+p3) because a tree has depth log2(4)=2 instead
-    // of 3, which is a shorter critical path for free.
-    wire signed [31:0] sum_comb = ($signed(p0) + $signed(p1)) +
-                                  ($signed(p2) + $signed(p3));
+    // Widen each product to the full accumulator width BEFORE summing.
+    //
+    // Verilog would actually get this right on its own: expression width is
+    // determined by the assignment context, so the additions below would be
+    // performed in 32 bits even if the operands were left at 16. The
+    // all -128 test case (4 * 16384 = 65536, which needs 17 bits) passes
+    // either way and proves it.
+    //
+    // We widen explicitly anyway, for two reasons. First, relying on
+    // context-determined width is one of Verilog's genuinely surprising
+    // rules, and a reader should not have to know it to trust this line.
+    // Second, if someone later factors the sum into an intermediate
+    // 16-bit wire, the implicit version would silently start truncating --
+    // and the failure would be data-dependent. Verilator flags the implicit
+    // form (WIDTHEXPAND) for exactly this reason.
+    // {{16{p[15]}}, p} replicates the sign bit 16 times and appends the
+    // product -- the same explicit sign-extension idiom used for the int4
+    // nibbles above. A bare assignment would also work, but this states the
+    // intent in the code rather than leaving it to Verilog's width rules.
+    wire signed [31:0] p0_ext = {{16{p0[15]}}, p0};
+    wire signed [31:0] p1_ext = {{16{p1[15]}}, p1};
+    wire signed [31:0] p2_ext = {{16{p2[15]}}, p2};
+    wire signed [31:0] p3_ext = {{16{p3[15]}}, p3};
+
+    // Balanced tree ((p0+p1)+(p2+p3)) rather than a chain, because a tree has
+    // depth log2(4)=2 instead of 3 -- a shorter critical path for free.
+    wire signed [31:0] sum_comb = (p0_ext + p1_ext) + (p2_ext + p3_ext);
 
     // Optional pipeline register (see PARAMETERS above).
     reg signed [31:0] sum_q;

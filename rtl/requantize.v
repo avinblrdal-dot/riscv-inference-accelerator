@@ -106,8 +106,16 @@ module requantize #(
     // one and produce a wildly wrong classification.
     wire signed [63:0] biased = shifted + $signed({{32{zero_point[31]}}, zero_point});
 
-    assign q_out = (biased < QMIN) ? QMIN :
-                   (biased > QMAX) ? QMAX :
-                                     biased[31:0];
+    // The saturation limits are 32-bit but `biased` is 64-bit. Verilog would
+    // sign-extend the comparison correctly, but doing it explicitly means the
+    // widths on both sides of each comparison are visible in the source --
+    // and this is the module where a silent width error would corrupt every
+    // number the project produces.
+    wire signed [63:0] qmin64 = {{32{QMIN[31]}}, QMIN};
+    wire signed [63:0] qmax64 = {{32{QMAX[31]}}, QMAX};
+
+    assign q_out = (biased < qmin64) ? QMIN :
+                   (biased > qmax64) ? QMAX :
+                                       biased[31:0];
 
 endmodule

@@ -122,7 +122,13 @@ module soc_top #(
         .pcpi_wait  (pcpi_wait),
         .pcpi_ready (pcpi_ready),
         .irq        (32'd0),
-        .eoi        ()
+        .eoi        (),
+        // ENABLE_TRACE is 0, so these outputs are unused. Listing them
+        // explicitly (rather than omitting them) documents that the omission
+        // is deliberate and silences Verilator's PINMISSING warning, which
+        // otherwise hides real missing connections in the noise.
+        .trace_valid(),
+        .trace_data ()
     );
 
     //-----------------------------------------------------------------------
