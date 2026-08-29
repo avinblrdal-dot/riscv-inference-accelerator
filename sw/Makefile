@@ -31,10 +31,13 @@ OBJCOPY := $(CROSS)objcopy
 OBJDUMP := $(CROSS)objdump
 SIZE    := $(CROSS)size
 
-BUILD := build
+BUILD ?= build
 SRC   := src
 INC   := include
-MODELS := models
+# Which generated model header to compile against. The int4 sweep needs a
+# separately quantized model, because int4 hardware sign-extends nibbles and
+# would mis-decode int8 weights entirely.
+MODELS ?= models
 
 # -march=rv32i  : base integer ISA only. NO 'm' extension -- the whole point
 #                 is that this core has no hardware multiply, so the baseline

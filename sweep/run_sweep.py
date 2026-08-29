@@ -141,14 +141,20 @@ def build_verilator(array_h: int, array_w: int, wbuf: int, abuf: int,
     return True, ""
 
 
-def golden_class(workload: str) -> int | None:
-    """The classification the Python reference produces for this workload."""
+def golden_class(workload: str, precision: int = 8) -> int | None:
+    """The classification the Python reference produces for this workload.
+
+    Each precision has its OWN golden vector, because quantizing to int4
+    changes the numbers. Checking an int4 run against the int8 golden would
+    be comparing against the wrong reference.
+    """
     import json
     cfg_path = os.path.join(ROOT, "train", "config", f"{workload}.yaml")
     if not os.path.exists(cfg_path):
         return None
     name = load_config(cfg_path).get("name")
-    meta = os.path.join(ROOT, "sim", "golden", f"{name}.json")
+    gdir = "golden" if precision == 8 else f"golden_int{precision}"
+    meta = os.path.join(ROOT, "sim", gdir, f"{name}.json")
     if not os.path.exists(meta):
         return None
     with open(meta) as fh:
@@ -166,10 +172,16 @@ def run_simulation(array_h: int, array_w: int, wbuf: int, abuf: int,
     if not ok:
         return {"sim_ok": False, "error": "verilator build failed: " + err}
 
-    fw = os.path.join(ROOT, "sw", "build", f"{variant}.hex")
+    # Firmware must match the hardware's precision. int4 hardware
+    # sign-extends the low nibble, so it needs a model quantized to int4;
+    # feeding it int8 weights would mis-decode any value outside [-8,7].
+    build_dir = "build" if precision == 8 else f"build_int{precision}"
+    fw = os.path.join(ROOT, "sw", build_dir, f"{variant}.hex")
     if not os.path.exists(fw):
         return {"sim_ok": False,
-                "error": f"{variant}.hex not built -- run 'make -C sw'"}
+                "error": f"{build_dir}/{variant}.hex not built -- run "
+                         f"'make -C sw MODELS=models_int{precision} "
+                         f"BUILD={build_dir}'"}
 
     dst = os.path.join(ROOT, "sim", "build", "firmware.hex")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -366,7 +378,8 @@ def main() -> int:
     print(f"  output:    {out_csv}")
     print()
 
-    wl_golden = {wl: golden_class(wl) for wl in workloads}
+    wl_golden = {(wl, pr): golden_class(wl, pr)
+                 for wl in workloads for pr in precisions}
     print(f"  golden classes: {wl_golden}")
     print(f"  firmware variant: {VARIANT}")
     print()
@@ -380,7 +393,7 @@ def main() -> int:
                 sim = run_simulation(ah, aw, wb, wb, prec, wl,
                                      cfg["simulation"]["timeout_seconds"],
                                      workdir, VARIANT,
-                                     wl_golden.get(wl))
+                                     wl_golden.get((wl, prec)))
                 syn = ({"synth_ok": False} if args.dry_run else
                        run_synthesis(ah, aw, wb, wb, prec,
                                      cfg["synthesis"]["part"],

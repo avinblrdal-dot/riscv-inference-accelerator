@@ -9,6 +9,43 @@ section matters most.
 
 ---
 
+## 2026-08-29 (late) — int4 path built; full 3-factor sweep complete
+
+**Goal:** Make `precision` a real factor. It was in the experiment plan but had
+never been varied — it showed 0 degrees of freedom in the ANOVA, so the sweep
+was a 2-factor experiment pretending to be 3-factor.
+
+**What I did:** Quantized the model to int4, exported a separate header and
+its own golden vectors, made `sw/Makefile` able to build against either model,
+and taught the sweep to match firmware precision to hardware precision (and to
+check each run against the *matching* golden, not the int8 one).
+
+**Results — 32 configurations, all verified correct:**
+
+| Term | Variance explained |
+|---|---|
+| array width | 77.2% |
+| buffer depth | 21.0% |
+| width x depth | 1.7% |
+| precision | 0.01% |
+
+int4 saves 0.43% of cycles — and exactly 300,500 cycles in *every*
+configuration, i.e. a fixed operand-transfer saving rather than anything that
+scales.
+
+**What broke / open questions:**
+- I set up "int4 model on int8 hardware" expecting it to fail as a control. It
+  did not: both give class 2. Correct, and I should have predicted it — int4
+  values live in [-7,7], which is inside int8's range, so sign-extending the
+  low nibble is a no-op. Not a bug; a bad control.
+- RQ4 is only partially answered. Cycles: settled (no benefit). Area and
+  energy: blocked on Vivado and the PPK2. Accuracy: blocked on real training
+  data. Say so explicitly rather than implying int4 was evaluated in full.
+
+**Next step:** workload B firmware for RQ5; DMA to attack the 0.2% array
+utilisation.
+
+---
 ## 2026-08-29 (evening) — Array variant fixed; full sweep run; RQ3 answered
 
 **Who:** project session

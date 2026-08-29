@@ -137,7 +137,33 @@ binding constraint on this design is the **CPU-to-accelerator interface**
 (DMA, burst transfers, a wider bus), not the array width or buffer depth the
 sweep was built to vary. See [EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md).
 
-### RQ3 — swept and answered (MEASURED; all 16 configurations verified correct)
+### RQ3 / RQ4 — full 3-factor sweep (MEASURED; all 32 configurations verified correct)
+
+Complete factorial: 4 array widths × 4 buffer depths × 2 precisions. Every
+configuration was checked against its own golden classification before its
+cycle count was recorded.
+
+**Variance in log-cycles explained by each factor:**
+
+| Term | Share | Effect |
+|---|---|---|
+| array width | **77.2%** | large |
+| buffer depth | **21.0%** | large |
+| width × depth interaction | 1.7% | small |
+| precision | 0.01% | negligible |
+| all other interactions | 0.00% | negligible |
+
+**RQ4 (precision), partial answer.** int4 saves **0.43% of cycles** — and
+saves *exactly* 300,500 cycles in every single configuration. That is a fixed
+reduction in operand-transfer cost, not a scaling effect. Precision is
+essentially irrelevant to *runtime* in this design.
+
+That is not the whole of RQ4. int4's real payoff is **area and energy**, which
+need Vivado and a power measurement respectively — neither available yet. And
+the accuracy half needs a model trained on real data. What we can say now is
+narrow but solid: *at this scale, reducing precision does not buy speed.*
+
+### RQ3 — the interaction (MEASURED; all configurations verified correct)
 
 Cycles per inference, workload A, int8. Every cell was checked against the
 golden classification before being recorded.

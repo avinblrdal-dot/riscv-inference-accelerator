@@ -1,0 +1,55 @@
+{
+  "config_name": "workload_a_fault_classifier",
+  "generated_utc": "2026-08-29T18:57:57Z",
+  "git_sha": "583fce8a28b0c0cfcef3155b8ab265be810f12fc-dirty",
+  "seed": 20260828,
+  "synthetic": true,
+  "weight_sha256": "c6962f6d56306c98c9ffdf1d680df4eea5bfe537829f85f808c44d485c28fb69",
+  "input_shape": [
+    1,
+    32,
+    32
+  ],
+  "num_classes": 4,
+  "predicted_class": 2,
+  "layers": [
+    {
+      "index": 0,
+      "type": "conv",
+      "weight_shape": [
+        8,
+        1,
+        3,
+        3
+      ],
+      "multiplier": 1268202002,
+      "shift": 33,
+      "precision": 4
+    },
+    {
+      "index": 1,
+      "type": "conv",
+      "weight_shape": [
+        16,
+        8,
+        3,
+        3
+      ],
+      "multiplier": 1213619993,
+      "shift": 34,
+      "precision": 4
+    },
+    {
+      "index": 2,
+      "type": "fc",
+      "weight_shape": [
+        4,
+        1024
+      ],
+      "multiplier": 2013452015,
+      "shift": 36,
+      "precision": 4
+    }
+  ],
+  "note": "SYNTHETIC weights -- not a trained model. Any accuracy computed from this is meaningless."
+}
