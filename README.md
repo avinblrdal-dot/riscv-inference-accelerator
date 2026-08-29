@@ -56,9 +56,14 @@ sensor bolted to a pump cannot be recharged.
 
 ## Results
 
-> **No results yet.** Every entry below is `TBD_MEASURED` because the hardware
-> has not been purchased. This project does not substitute estimates for
-> measurements — see [MEASUREMENT_PROTOCOL.md](docs/MEASUREMENT_PROTOCOL.md).
+> **Timing results are measured; physical results are not yet.** RQ1, RQ2, RQ3
+> and the timing half of RQ4 are answered below from cycle-accurate simulation
+> (deterministic, exact, all 32 sweep configurations verified against golden
+> vectors). The table immediately below covers the quantities that require
+> physical hardware — energy, area, accuracy — and every one of those is still
+> `TBD_MEASURED` because the hardware has not been purchased. This project does
+> not substitute estimates for measurements — see
+> [MEASUREMENT_PROTOCOL.md](docs/MEASUREMENT_PROTOCOL.md).
 
 | Metric | Baseline | Accelerated |
 |---|---|---|
