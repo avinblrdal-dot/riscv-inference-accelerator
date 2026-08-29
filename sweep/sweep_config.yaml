@@ -1,0 +1,64 @@
+# ===========================================================================
+# sweep_config.yaml -- the design space exploration
+# ===========================================================================
+#
+# This file defines the EXPERIMENT. See docs/EXPERIMENT_PLAN.md for the
+# statistical model and the hypotheses; this is just the factor levels.
+#
+# FULL FACTORIAL, not one-factor-at-a-time. That choice is the whole point:
+# RQ3 asks whether buffering matters MORE at larger array widths, which is an
+# INTERACTION. One-factor-at-a-time designs cannot detect interactions at all
+# -- they would report two independent main effects and miss the actual
+# finding. A factorial design gets interactions essentially for free.
+# ===========================================================================
+
+factors:
+  # Array width. 1 is effectively "one MAC unit", the closest thing to the
+  # scalar baseline that still uses the array datapath.
+  array_w: [1, 2, 4, 8]
+
+  # Local buffer depth in 32-bit words. 0 is the CONTROL CASE: no local
+  # storage, every operand re-fetched from main memory. It must be included
+  # or there is nothing to compare buffering against.
+  wbuf_depth: [0, 64, 256, 1024]
+
+  # Weight/activation precision. RQ4.
+  precision: [8, 4]
+
+  workload: [workload_a, workload_b]
+
+# Array height tracks width (square arrays) unless overridden. Square keeps
+# the factorial from exploding to 4x4x4x2x2 = 256 cells; docs/EXPERIMENT_PLAN.md
+# records this as a deliberate scope limit, and a follow-up study could
+# examine non-square shapes, which mac_array.v already supports.
+array_h_follows_w: true
+
+# Full factorial: 4 x 4 x 2 x 2 = 64 configurations.
+# With 5 replicates that is 320 simulation runs. Simulation is deterministic,
+# so replicates exist to capture TOOL variation (synthesis is seeded and can
+# vary run to run), not simulation noise -- see the note in run_sweep.py.
+replicates: 5
+
+# Vivado synthesis is slow (minutes per configuration). --dry-run skips it and
+# collects simulation-only metrics, which is how the whole pipeline gets
+# developed before anyone has Vivado installed.
+synthesis:
+  enabled: true
+  part: xc7a100tcsg324-1        # Arty A7-100T
+  target_clock_mhz: 100
+  # The A7-100T has 240 DSP slices. An 8x8 int8 array needs 64, so even the
+  # largest configuration fits with room to spare -- which is exactly why the
+  # 100T was chosen over the retired 35T (90 DSPs).
+  dsp_budget: 240
+
+simulation:
+  enabled: true
+  timeout_seconds: 600
+  # Cycle counts come from the RTL testbench; they are exact and repeatable.
+  metrics: [cycles_total, cycles_active, cycles_stall, macs_done]
+
+output:
+  csv: sweep/results/sweep_results.csv
+  # Every row records the git SHA, tool versions and a timestamp, so a result
+  # can always be traced back to the exact code that produced it.
+  record_provenance: true
