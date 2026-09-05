@@ -130,12 +130,24 @@ def main() -> int:
             L["pad"] = int(z[f"L{i}_pad"])
         layers.append(L)
 
-    topology = [s["type"] for s in cfg["model"]["layers"]]
+    # fc_autoencoder (workload B) is deployed as the REDUCED `deployed_model`
+    # block -- see the matching comment in quantize.py::synthetic_model. Using
+    # `cfg["model"]["layers"]` here would build a topology table and an input
+    # shape for the ~139k-weight full model, which does not match the ~8.8k
+    # weights actually being exported and does not fit in the SoC's RAM.
+    is_autoencoder = cfg["model"]["architecture"] == "fc_autoencoder"
+    if is_autoencoder:
+        dep = cfg["deployed_model"]
+        layer_specs = dep["layers"]
+        in_ch, in_h, in_w = 1, dep["input_dim"], 1
+    else:
+        layer_specs = cfg["model"]["layers"]
+        inp = cfg["input"]
+        in_ch = inp.get("channels", 1)
+        in_h = inp.get("n_mels", inp.get("n_bins", 32))
+        in_w = inp.get("n_frames", 1)
 
-    inp = cfg["input"]
-    in_ch = inp.get("channels", 1)
-    in_h = inp.get("n_mels", inp.get("n_bins", 32))
-    in_w = inp.get("n_frames", 1)
+    topology = [s["type"] for s in layer_specs]
     in_shape = (in_ch, in_h, in_w)
 
     # Deterministic test input from the model seed, so the golden vectors are
@@ -147,7 +159,21 @@ def main() -> int:
     out, captures = run_reference(layers, topology, test_input, in_shape)
     predicted = int(np.argmax(out.ravel()))
     print(f"  reference output: {out.ravel().tolist()}")
-    print(f"  predicted class:  {predicted}")
+    recon_mae = None
+    if is_autoencoder:
+        # argmax over a reconstruction is not a meaningful "class" -- an
+        # autoencoder's output IS the answer (the reconstructed vector), not
+        # an index into it. Kept only as MODEL_EXPECTED_CLASS below so the
+        # existing generic self-check plumbing still has a scalar to compare,
+        # but sw/src/main.c must not report it as a classification result.
+        # MAE, not MSE: matches detection.metric in workload_b.yaml, and
+        # squaring in int32 risks overflow on a 512-dim vector (see the
+        # config's own comment on this choice).
+        recon_mae = int(np.mean(np.abs(out.ravel().astype(np.int32)
+                                       - test_input.ravel().astype(np.int32))))
+        print(f"  reconstruction MAE vs input (synthetic, meaningless): {recon_mae}")
+    else:
+        print(f"  predicted class:  {predicted}")
 
     max_tensor = max(int(np.prod(in_shape)),
                      max(int(c[1].size) for c in captures))
@@ -228,12 +254,28 @@ typedef struct {{
     # no host in the loop.
     parts.append(c_array("model_expected_output", out.ravel(), "int8_t"))
     parts.append(f"#define MODEL_EXPECTED_CLASS {predicted}")
+    # MODEL_TASK tells sw/src/main.c whether the final tensor is a class
+    # score vector (argmax it) or a reconstruction (diff it against the
+    # input). Getting this wrong would make main.c report a meaningless
+    # "class" for the autoencoder -- exactly the kind of silent nonsense
+    # result this project's bit-exactness discipline exists to prevent.
+    parts.append(f"#define MODEL_TASK_CLASSIFY   0")
+    parts.append(f"#define MODEL_TASK_RECONSTRUCT 1")
+    parts.append(f"#define MODEL_TASK "
+                 f"{'MODEL_TASK_RECONSTRUCT' if is_autoencoder else 'MODEL_TASK_CLASSIFY'}")
+    # Bit-exact reference for the reconstruction path, analogous to
+    # MODEL_EXPECTED_CLASS on the classification path. Firmware and RTL
+    # simulation are deterministic integer arithmetic, so this MAE is an
+    # exact value to check against -- not an estimate -- the same way a
+    # golden class is.
+    if recon_mae is not None:
+        parts.append(f"#define MODEL_EXPECTED_RECONSTRUCTION_MAE {recon_mae}")
 
     # Topology table.
     entries = []
     wi = 0
     spatial = [in_ch, in_h, in_w]
-    for spec in cfg["model"]["layers"]:
+    for spec in layer_specs:
         t = spec["type"]
         if t == "conv":
             L = layers[wi]
@@ -302,6 +344,8 @@ typedef struct {{
         "input_shape": list(in_shape),
         "num_classes": int(out.size),
         "predicted_class": predicted,
+        "task": "reconstruct" if is_autoencoder else "classify",
+        "expected_reconstruction_mae": recon_mae,
         "layers": [
             {"index": i, "type": L["type"],
              "weight_shape": list(np.asarray(L["weight"]).shape),

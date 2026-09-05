@@ -101,6 +101,14 @@ static int8_t buf_a[MODEL_MAX_TENSOR];
 static int8_t buf_b[MODEL_MAX_TENSOR];
 #define SCRATCH_UNUSED ((int32_t *)0)
 
+/* The final layer's output, copied out of the ping-pong buffers so `measure`
+ * can inspect it after `run_inference` returns. Exactly MODEL_NUM_CLASSES
+ * bytes: for a classifier that's the number of classes; for an autoencoder
+ * (MODEL_TASK_RECONSTRUCT) export_weights.py sets it to the reconstruction
+ * length, which by construction equals the input length -- see the "must
+ * reconstruct its input" check in train/models.py::_build_autoencoder. */
+static int8_t final_out[MODEL_NUM_CLASSES];
+
 /* Declared in nn_dot4.c / nn_array.c. */
 void nn_fc_dot4(const int8_t *in, const nn_fc_t *layer, int8_t *out);
 void nn_conv2d_dot4(const int8_t *in, int32_t in_h, int32_t in_w,
@@ -179,6 +187,11 @@ static int32_t run_inference(variant_t variant, const int8_t *input,
     }
 
     *mac_cycles = layer_cycles;
+    for (int32_t i = 0; i < MODEL_NUM_CLASSES; i++) final_out[i] = cur[i];
+    /* Always computed, even for MODEL_TASK_RECONSTRUCT, where it is not a
+     * class -- it costs nothing and keeping one return type keeps this
+     * function's signature the same regardless of task. `measure` below is
+     * what decides whether the value means anything. */
     return nn_argmax(cur, MODEL_NUM_CLASSES);
 }
 
@@ -202,7 +215,30 @@ static void measure(const char *name, variant_t variant)
     uart_puts("--- ");
     uart_puts(name);
     uart_puts(" ---\n");
-    report("class",        cls);
+#if MODEL_TASK == MODEL_TASK_RECONSTRUCT
+    /* An autoencoder's output is a reconstruction of the input, not a class
+     * score -- reporting nn_argmax's return value here as "class" would be a
+     * number with no meaning, exactly the kind of silent nonsense result
+     * this project's bit-exactness discipline exists to catch. Report the
+     * reconstruction error against the same input the Python reference used,
+     * and the reference's own value for it, so a mismatch is visible without
+     * a host in the loop. Both sides are deterministic integer arithmetic,
+     * so this comparison is bit-exact, not a tolerance check. */
+    (void)cls;
+    {
+        int32_t sum_abs_err = 0;
+        for (int32_t i = 0; i < MODEL_NUM_CLASSES; i++) {
+            int32_t d = (int32_t)final_out[i] - (int32_t)model_test_input[i];
+            if (d < 0) d = -d;
+            sum_abs_err += d;
+        }
+        report("reconstruction_mae", sum_abs_err / MODEL_NUM_CLASSES);
+        report("expected_reconstruction_mae", MODEL_EXPECTED_RECONSTRUCTION_MAE);
+    }
+#else
+    report("class",          cls);
+    report("expected_class", MODEL_EXPECTED_CLASS);
+#endif
     report("cycles_total", (int32_t)total_cycles);
     report("cycles_mac",   (int32_t)mac_cycles);
     report("instret",      (int32_t)total_instr);

@@ -519,33 +519,55 @@ def stage_layers(rep: Reporter, seed: int, workdir: str) -> None:
 # Stage: the WHOLE model -- Python vs C, layer by layer
 # --------------------------------------------------------------------------
 
+def discover_model_dirs() -> list[tuple[str, str, str]]:
+    """Find every (label, header_dir, golden_dir) pair that has been built.
+
+    A separate header/golden pair exists per workload AND per precision --
+    "sw/models" + "sim/golden" for workload A at int8, "sw/models_b" +
+    "sim/golden_b" for workload B, "sw/models_int4" + "sim/golden_int4" for
+    the RQ4 precision sweep, and so on. Discovering them by directory name
+    rather than hardcoding "sw/models" is what lets this check scale to a
+    second workload without silently checking only one of them (or checking
+    an arbitrary one, which is what picking npzs[0] used to do).
+    """
+    sw_dir = os.path.join(ROOT, "sw")
+    pairs = []
+    if not os.path.isdir(sw_dir):
+        return pairs
+    for name in sorted(os.listdir(sw_dir)):
+        if name != "models" and not name.startswith("models_"):
+            continue
+        header_dir = os.path.join(sw_dir, name)
+        if not os.path.exists(os.path.join(header_dir, "model_weights.h")):
+            continue
+        golden_name = "golden" + name[len("models"):]  # models_b -> golden_b
+        golden_dir = os.path.join(ROOT, "sim", golden_name)
+        pairs.append((name, header_dir, golden_dir))
+    return pairs
+
+
 def stage_full_model(rep: Reporter, workdir: str) -> None:
-    """Run the exported model end to end in C and diff every intermediate.
+    """Run every exported model end to end in C and diff every intermediate.
 
     This is the strongest check in the suite. The scalar and layer stages
     prove the primitives agree; this proves they agree when COMPOSED, with the
     real generated weights, the real topology, and the real buffer
     ping-ponging in between. Composition is where shape and stride bugs live.
 
-    Diffing every LAYER rather than just the final class matters: a bug in an
-    early layer can be masked by argmax, so a matching class is weak evidence
-    while matching intermediates is strong evidence.
+    Diffing every LAYER rather than just the final output matters: a bug in
+    an early layer can be masked by the final layer (argmax, or an
+    autoencoder's own averaging), so a matching final value is weak evidence
+    while matching every intermediate is strong evidence.
 
-    Skipped (not failed) when the generated header or golden vectors are
-    absent, since those are build products -- run `make weights` first.
+    Runs once per discovered (workload, precision) header/golden pair -- see
+    discover_model_dirs -- so adding workload B does not silently leave it
+    unchecked. Skipped (not failed) when nothing has been generated yet,
+    since headers and golden vectors are build products -- run `make weights`.
     """
-    header = os.path.join(ROOT, "sw", "models", "model_weights.h")
-    if not os.path.exists(header):
+    pairs = discover_model_dirs()
+    if not pairs:
         rep.skip("full model: Python vs C",
-                 "sw/models/model_weights.h not generated yet -- run 'make weights'")
-        return
-
-    golden_dir = os.path.join(ROOT, "sim", "golden")
-    npzs = [f for f in os.listdir(golden_dir)] if os.path.isdir(golden_dir) else []
-    npzs = [f for f in npzs if f.endswith(".npz")]
-    if not npzs:
-        rep.skip("full model: Python vs C",
-                 "no golden vectors in sim/golden -- run 'make weights'")
+                 "no sw/models*/model_weights.h found -- run 'make weights'")
         return
 
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
@@ -553,69 +575,96 @@ def stage_full_model(rep: Reporter, workdir: str) -> None:
         rep.skip("full model: Python vs C", "no host C compiler")
         return
 
-    binary = os.path.join(workdir, "full_model")
-    res = subprocess.run(
-        [cc, "-std=c99", "-O2", "-Wall", "-Wextra",
-         "-I", os.path.join(ROOT, "sw", "include"),
-         "-I", os.path.join(ROOT, "sw", "models"),
-         os.path.join(ROOT, "train", "parity_src", "full_model_harness.c"),
-         os.path.join(ROOT, "sw", "src", "quant.c"),
-         os.path.join(ROOT, "sw", "src", "nn_baseline.c"),
-         "-o", binary],
-        capture_output=True, text=True)
-    if res.returncode != 0:
-        rep.fail("full model: Python vs C",
-                 "the generated header did not compile:\n" + res.stderr[:1500])
-        return
+    for label, header_dir, golden_dir in pairs:
+        check_name = f"full model: Python vs C [{label}]"
 
-    run = subprocess.run([binary], capture_output=True, text=True)
-    if run.returncode != 0:
-        rep.fail("full model: Python vs C", f"harness exited {run.returncode}")
-        return
+        npzs = ([f for f in os.listdir(golden_dir) if f.endswith(".npz")]
+                if os.path.isdir(golden_dir) else [])
+        if not npzs:
+            rep.skip(check_name,
+                     f"no golden vectors in {os.path.relpath(golden_dir, ROOT)} "
+                     f"-- run 'make weights' for this workload/precision")
+            continue
+        if len(npzs) > 1:
+            rep.fail(check_name,
+                     f"{golden_dir} holds {len(npzs)} golden vectors "
+                     f"({npzs}) -- each header/golden directory should hold "
+                     f"exactly one model's artifacts, or this check cannot "
+                     f"tell which one the header matches.")
+            continue
 
-    c_layers, c_class = [], None
-    for line in run.stdout.splitlines():
-        if line.startswith("LAYER"):
-            c_layers.append([int(x) for x in line.split(":")[1].split()])
-        elif line.startswith("CLASS"):
-            c_class = int(line.split()[1])
+        binary = os.path.join(workdir, f"full_model_{label}")
+        res = subprocess.run(
+            [cc, "-std=c99", "-O2", "-Wall", "-Wextra",
+             "-I", os.path.join(ROOT, "sw", "include"),
+             "-I", header_dir,
+             os.path.join(ROOT, "train", "parity_src", "full_model_harness.c"),
+             os.path.join(ROOT, "sw", "src", "quant.c"),
+             os.path.join(ROOT, "sw", "src", "nn_baseline.c"),
+             "-o", binary],
+            capture_output=True, text=True)
+        if res.returncode != 0:
+            rep.fail(check_name,
+                     "the generated header did not compile:\n" + res.stderr[:1500])
+            continue
 
-    z = np.load(os.path.join(golden_dir, npzs[0]))
-    keys = sorted([k for k in z.files if k.startswith("layer")],
-                  key=lambda k: int(k.split("_")[0][5:]))
+        run = subprocess.run([binary], capture_output=True, text=True)
+        if run.returncode != 0:
+            rep.fail(check_name, f"harness exited {run.returncode}")
+            continue
 
-    if len(keys) != len(c_layers):
-        rep.fail("full model: Python vs C",
-                 f"layer count differs: golden has {len(keys)}, C produced "
-                 f"{len(c_layers)}. The topology table in the generated header "
-                 f"does not match the config.")
-        return
+        c_layers, c_class = [], None
+        for line in run.stdout.splitlines():
+            if line.startswith("LAYER"):
+                c_layers.append([int(x) for x in line.split(":")[1].split()])
+            elif line.startswith("CLASS"):
+                c_class = int(line.split()[1])
 
-    total = 0
-    for i, k in enumerate(keys):
-        exp = z[k].ravel().tolist()
-        got = c_layers[i]
-        total += len(exp)
-        mm = first_mismatch(exp, got)
-        if mm is not None:
-            idx, e, g = mm
-            rep.fail("full model: Python vs C",
-                     f"layer {i} ({k}) differs\n"
-                     f"  first mismatch at element {idx}\n"
-                     f"  python expected: {e}\n  C returned: {g}\n"
-                     f"  ({len(exp)} elements in this layer)")
-            return
+        z = np.load(os.path.join(golden_dir, npzs[0]))
+        keys = sorted([k for k in z.files if k.startswith("layer")],
+                      key=lambda k: int(k.split("_")[0][5:]))
 
-    golden_class = int(z["predicted_class"])
-    if c_class != golden_class:
-        rep.fail("full model: Python vs C",
-                 f"every layer matched but the predicted class differs: "
-                 f"python={golden_class} C={c_class}. Check nn_argmax's "
-                 f"tie-breaking rule.")
-        return
+        if len(keys) != len(c_layers):
+            rep.fail(check_name,
+                     f"layer count differs: golden has {len(keys)}, C produced "
+                     f"{len(c_layers)}. The topology table in the generated header "
+                     f"does not match the config.")
+            continue
 
-    rep.ok("full model: Python vs C",
-           f"{len(keys)} layers, {total} values, class={c_class}")
+        total = 0
+        mismatched = False
+        for i, k in enumerate(keys):
+            exp = z[k].ravel().tolist()
+            got = c_layers[i]
+            total += len(exp)
+            mm = first_mismatch(exp, got)
+            if mm is not None:
+                idx, e, g = mm
+                rep.fail(check_name,
+                         f"layer {i} ({k}) differs\n"
+                         f"  first mismatch at element {idx}\n"
+                         f"  python expected: {e}\n  C returned: {g}\n"
+                         f"  ({len(exp)} elements in this layer)")
+                mismatched = True
+                break
+        if mismatched:
+            continue
+
+        # Every layer matched, including the final one -- for a classifier
+        # that already proves the class agrees, but nn_argmax's tie-breaking
+        # rule is cheap to double-check explicitly. For an autoencoder this
+        # is a tautological consistency check (both sides argmax the same
+        # already-matched values), not a claim that the index means anything.
+        golden_class = int(z["predicted_class"])
+        if c_class != golden_class:
+            rep.fail(check_name,
+                     f"every layer matched but nn_argmax(final_layer) differs: "
+                     f"python={golden_class} C={c_class}. Check nn_argmax's "
+                     f"tie-breaking rule.")
+            continue
+
+        rep.ok(check_name, f"{len(keys)} layers, {total} values, "
+                           f"final-layer argmax={c_class}")
 
 
 # --------------------------------------------------------------------------

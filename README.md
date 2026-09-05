@@ -206,14 +206,27 @@ We are reporting that as stated rather than lowering the threshold after
 seeing the data. The pre-registration in
 [EXPERIMENT_PLAN.md](docs/EXPERIMENT_PLAN.md) exists for exactly this moment.
 
+> **This verdict is provisional on the response variable, and we say so first
+> rather than waiting to be asked.** RQ3 asks about *energy*; what is measured
+> above is *cycles*. Those are not the same quantity, and they diverge in
+> exactly the direction that matters here: a buffer hit and a buffer miss cost
+> nearly the same number of cycles but very different amounts of energy,
+> because the miss drives a wider, longer wire. Cycle-based analysis therefore
+> **systematically under-weights the factor RQ3 is about**. The honest reading
+> today is "not supported *on cycles*." The energy re-analysis, once the PPK2
+> data exists, is a genuine second test of the same hypothesis and may
+> legitimately reach a different verdict — which is a pre-registered
+> expectation here, not a licence to keep testing until we like the answer.
+> Both verdicts get reported.
+
 ### What *is* verified today
 
 These are real, reproducible, and checkable from a clean clone:
 
 | Check | Result |
 |---|---|
-| Bit-exactness Python == C == Verilog | **10/10 stages pass** |
-| — full model, end to end | **7 layers, 27,652 values, bit-identical** |
+| Bit-exactness Python == C == Verilog | **12/12 checks pass** |
+| — full model, end to end | **3 models** (workload A int8 + int4, workload B) each bit-identical |
 | — harness self-test (injected fault) | **detected**, as required |
 | RTL testbenches | **~871 checks pass** |
 | SoC boots and prints over UART | **yes** (`RVACCEL-BOOT-OK`) |
@@ -235,6 +248,51 @@ Cycle counts from `make sweep-quick` (workload A, deterministic — exact):
 Local buffering changes **nothing** at width 1 and gives a **~4× improvement**
 at width 8. That is the interaction RQ3 predicts, visible in raw cycle counts
 before any statistics. Whether it holds for *energy* is the open question.
+
+### RQ5 — preliminary (MEASURED timing; NOT the full sweep; accuracy still synthetic)
+
+Workload B (the FFT autoencoder) is now built end to end — quantized,
+exported, cross-compiled, and bit-exact against the Python reference on real
+RTL simulation (`parity: 12 passed, 0 failed, 0 skipped`, three model
+variants). Getting there surfaced and fixed two pipeline bugs that were
+silently building the wrong model for this workload, and one environment bug
+that was silently blocking the *entire* sweep, workload A included — see
+D018–D020 in [DECISIONS.md](docs/DECISIONS.md).
+
+Six configurations were spot-checked (not the full factorial) before writing
+this up, because the result already changes what the full sweep should
+prioritize:
+
+| Quantity | Workload A (CNN) | Workload B (FC autoencoder) |
+|---|---|---|
+| Baseline MAC fraction | 99.48% | 99.8% |
+| `dot4` vs baseline | 0.98× (slower) | **5.75×** |
+| Best array (4×4/256) vs baseline | 5.07× | 5.33× |
+| 8×8 vs 4×4 array | worse | worse — **replicates** |
+
+**One finding replicates, one reverses, and both are informative.** The
+array-width optimum (8×8 losing to 4×4) showing up again on a structurally
+unrelated model — no convolutions, no 2-D data, a different arithmetic
+profile entirely — is real evidence it's a property of the operand-delivery
+path rather than an artifact of one convolution's shape.
+
+The `dot4` vs. array ranking, though, **flips completely**: `dot4` was
+workload A's single worst variant (slower than doing nothing) and is workload
+B's single best, beating even the tuned array. This has a mechanistic
+explanation rather than being noise: `dot4` needs four *contiguous* int8
+values to pack into its operand word. A 3×3 convolution's reduction is only
+three wide, so `dot4` mostly falls back to scalar work on workload A. An FC
+layer's reduction is fully contiguous end to end, which is exactly `dot4`'s
+best case — precisely what
+[workload_b.yaml](train/config/workload_b.yaml)'s header predicted before any
+of this was measured.
+
+**This is not RQ5 answered.** No ANOVA, no variance decomposition, and no
+accuracy — the weights remain synthetic (`accuracy_is_synthetic = True`
+throughout). It is a reason to run `dot4` as a genuine contender in the full
+workload-B sweep, not as a control everyone already expects to lose, and a
+reason "does the *winning strategy* generalize" may be the more interesting
+half of RQ5, separate from "does the *speedup number* generalize."
 
 ---
 
@@ -298,18 +356,19 @@ make analysis      # ANOVA, Pareto frontier, figures
 | 01 Repo, CI, submodule | Done |
 | 02 Simulation infrastructure | Done |
 | 03 SoC: CPU + memory + UART + counters | Done — boots and prints |
-| 04 Software build system | Done (host build verified; cross-compile untested — no toolchain) |
-| 05 Training / quantization / export | Done (synthetic path verified; real training needs PyTorch + datasets) |
-| 06 Bit-exactness harness | **Done — 10/10, including a self-test** |
-| 07 `dot4` custom instruction | Done — verified on the real core |
-| 08 MAC array + buffers + FSM | Done — verified in simulation |
+| 04 Software build system | Done — cross-compiles cleanly, both workloads, both precisions (xPack toolchain) |
+| 05 Training / quantization / export | Done, both workloads (synthetic path verified; real training needs PyTorch + datasets) |
+| 06 Bit-exactness harness | **Done — 12/12, including a self-test, across 3 model variants** |
+| 07 `dot4` custom instruction | Done — verified on the real core, both workloads |
+| 08 MAC array + buffers + FSM | Done — verified in simulation, both workloads |
 | 09 Vivado flow | Written, **never run** (no Vivado) |
-| 10 Sweep automation | Done (dry run); synthesis path untested |
+| 10 Sweep automation | Done (dry run); workload B wired in; synthesis path untested |
 | 11 Measurement scripts | Written, **never run against hardware** |
 | 12 Analysis | Done — validated against known ground truth |
 | 13 Documentation | Done |
 | 14 Energy measurements | **Blocked** — no PPK2 |
 | 15 Real datasets | **Blocked** — see `TODO_BLOCKED` |
+| 16 Workload B / RQ5 | Firmware built + bit-exact; 6 configs spot-checked (not the full sweep) |
 
 ---
 
@@ -344,8 +403,15 @@ rather than by memory:
 ## Reproducing every result
 
 1. `make test` — bit-exactness and RTL, from a clean clone.
-2. `make weights` — regenerates the model, C header and golden vectors
-   deterministically from the frozen config and its recorded seed.
+2. `make weights` — regenerates workload A's model, C header and golden
+   vectors deterministically from the frozen config and its recorded seed.
+   For the other model variants, override the output directories so they
+   don't overwrite this one (see the comment above `MODELS_DIR` in the
+   top-level Makefile):
+   ```
+   make weights CONFIG=train/config/workload_b.yaml RUNDIR=train/runs/workload_b \
+                MODELS_DIR=sw/models_b GOLDEN_DIR=sim/golden_b
+   ```
 3. `make sweep` — cycle and stall counts for the design space.
 4. `make analysis` — statistics and figures.
 

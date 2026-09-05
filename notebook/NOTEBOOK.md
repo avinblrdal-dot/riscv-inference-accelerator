@@ -9,6 +9,85 @@ section matters most.
 
 ---
 
+## 2026-09-05 — Workload B built end to end; RQ5 firmware working; found a bug blocking every sweep
+
+**Goal:** Get workload B (the FFT autoencoder) through the same pipeline
+workload A already has — quantize, export, cross-compile, bit-exact parity,
+RTL simulation — so RQ5 stops being "not started."
+
+**What I found before I could build anything:** two of the three scripts that
+turn a config into firmware (`quantize.py`, `export_weights.py`) were silently
+building the WRONG model for workload B. `train/models.py` already knew to use
+the reduced `deployed_model` block (~8.8k weights) instead of the full
+139k-weight autoencoder for training, but the quantize/export path never got
+that memo — it was quietly building the full model, which does not fit in the
+SoC's RAM and isn't what `models.py` trains against. Nothing caught this
+because nobody had tried to actually export workload B before. Fixed in both
+scripts (see D018 in DECISIONS.md).
+
+**Second problem, same shape:** `main.c` always reported `nn_argmax(final
+layer)` as "the class," which is meaningless for an autoencoder — its output
+IS the answer, not an index into it. Added `MODEL_TASK` to the generated
+header so the firmware reports `reconstruction_mae` against a bit-exact
+golden value for an autoencoder, and `class` for a classifier, same as before.
+(D019)
+
+**Third problem, and this one was scary:** got everything built, tried to run
+the RTL simulation, and Verilator failed with "No rule to make target
+'.../Science'" — a nonsense error. Root cause: **this repo now lives at a path
+with a space in it** (`.../Science Fair/riscv-inference-accelerator`), and
+Verilator's generated Makefile lists source files unquoted and
+space-separated. This wasn't a workload B bug — it silently blocks the ENTIRE
+sweep, for both workloads, from this machine, since whenever the folder moved.
+If I hadn't been trying to run something new, this might not have been caught
+until someone tried to reproduce the existing 32-config sweep and got the same
+cryptic error with no idea why. Worked around it with a symlink at a
+space-free path (D020) and confirmed the fix by re-running workload A's
+4×4/wbuf=256 cell and getting back the exact cycle count already on record
+(52,051,049) — so the fix changes nothing about correctness, only about
+whether the build can run at all from here.
+
+**Results — bit-exact parity extended to workload B:**
+`train/verify_parity.py`'s full-model stage used to hardcode `sw/models/` and
+grab whichever golden `.npz` happened to be first in a directory listing —
+meaning it was possible to think two models were being checked when only one
+(arbitrary) one was. Rewrote it to discover every built `sw/models*/` header
+and check each by name. All three now pass: workload A int8, workload A int4,
+workload B int8 — `parity: 12 passed, 0 failed, 0 skipped`.
+
+**Results — a first (preliminary, timing-only) look at RQ5:**
+
+| | Workload A | Workload B |
+|---|---|---|
+| Baseline MAC fraction | 99.48% | 99.8% |
+| `dot4` vs baseline | 0.98× (slower) | **5.75×** |
+| Best array (4×4/256) | 5.07× | 5.33× |
+| 8×8 vs 4×4 | worse | worse (replicates!) |
+
+Two things jump out. The **array-width optimum replicates** — 8×8 losing to
+4×4 on a second, structurally unrelated model is real evidence it's a
+property of the operand-delivery path, not a fluke of one convolution's shape.
+But the **`dot4`-vs-array ranking flips completely**: `dot4` was workload A's
+worst variant and is workload B's best. Makes sense once you think about it —
+`dot4` needs 4 contiguous int8 values, which a 3×3 conv rarely has and an FC
+layer's reduction always does — but I did not expect a full reversal, only a
+smaller gap. Full writeup in D021.
+
+**What broke / open questions:**
+- This was six configurations, not a sweep. No ANOVA on workload B yet, no
+  accuracy (weights are still synthetic). Do NOT read this as "RQ5 answered."
+- The `dot4` reversal means the full workload-B sweep should treat `dot4` as
+  a real contender, not a control everyone already expects to lose.
+- Didn't touch DMA or the 0.2% array utilisation today — still the biggest
+  open lever, now doubly true since workload B's array is only ~0.2-0.9% busy
+  too.
+
+**Next step:** run the full workload-B factorial (currently only 6 cells spot
+-checked); then DMA / burst transfer, which is unblocked and independent of
+everything above.
+
+---
+
 ## 2026-08-29 (late) — int4 path built; full 3-factor sweep complete
 
 **Goal:** Make `precision` a real factor. It was in the experiment plan but had

@@ -17,6 +17,15 @@
 PYTHON  ?= python3
 CONFIG  ?= train/config/workload_a.yaml
 RUNDIR  ?= train/runs/workload_a
+# Where `make weights` writes the C header and golden vectors. Override both
+# together with CONFIG/RUNDIR when building the other workload, e.g.:
+#   make weights CONFIG=train/config/workload_b.yaml RUNDIR=train/runs/workload_b \
+#                MODELS_DIR=sw/models_b GOLDEN_DIR=sim/golden_b
+# Leaving these at the defaults while pointing CONFIG at workload_b would
+# silently overwrite workload_a's header -- both are regenerable build
+# products, but the two workloads need to coexist so RQ5 can compare them.
+MODELS_DIR ?= sw/models
+GOLDEN_DIR ?= sim/golden
 
 .PHONY: all help setup test parity sim sim-verbose weights sweep analysis \
         lint clean distclean check-tools submodules
@@ -106,7 +115,9 @@ weights:
 	    --out $(RUNDIR)/quantized.npz
 	@echo "--- exporting header + golden vectors ---"
 	$(PYTHON) train/export_weights.py --config $(CONFIG) \
-	    --quantized $(RUNDIR)/quantized.npz
+	    --quantized $(RUNDIR)/quantized.npz \
+	    --header-out $(MODELS_DIR)/model_weights.h \
+	    --golden-dir $(GOLDEN_DIR)
 	@echo ""
 	@echo "NOTE: these weights are SYNTHETIC. They prove the pipeline works;"
 	@echo "      they are not a trained model and produce no real accuracy."

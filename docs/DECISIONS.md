@@ -352,6 +352,132 @@ factor operate.
 
 ---
 
+## D018 — Workload B's pipeline scripts must build the `deployed_model`, not `model.layers`
+
+**Decision.** `train/quantize.py::synthetic_model` and `train/export_weights.py`
+now branch on `architecture == "fc_autoencoder"` and, when true, build the
+topology, input shape and test vector from `cfg["deployed_model"]` instead of
+`cfg["model"]["layers"]`.
+
+**Why.** `train/models.py::_build_autoencoder` already made this distinction
+correctly for the PyTorch training path (see its own comment), but the two
+scripts that generate the firmware header and golden vectors did not. Before
+this fix, `quantize.py --synthetic` on workload_b.yaml silently built the
+FULL ~139k-weight autoencoder — the one the config's own comment says does
+not fit in the SoC's 64 KB of RAM — rather than the ~8.8k-weight
+`deployed_model` that is actually meant to ship in firmware. It produced a
+header that would either fail to link (too large) or, worse, link against
+the wrong model and let a benchmark run without ever noticing it was
+measuring something other than what shipped. Caught by trying to actually
+build workload B's firmware for RQ5, not by any existing test — nothing was
+checking that these two scripts agreed with `models.py` about which model a
+`fc_autoencoder` config describes.
+
+---
+
+## D019 — An autoencoder's output is a reconstruction, not a class: `MODEL_TASK`
+
+**Decision.** `export_weights.py` now emits `MODEL_TASK` (`MODEL_TASK_CLASSIFY`
+or `MODEL_TASK_RECONSTRUCT`) into the generated header. `sw/src/main.c`
+branches on it: a classifier reports `class` against `MODEL_EXPECTED_CLASS`
+(unchanged); an autoencoder reports `reconstruction_mae` — the mean absolute
+error between the final layer and the original input — against
+`MODEL_EXPECTED_RECONSTRUCTION_MAE`, both computed by the same deterministic
+integer arithmetic on both sides, so the comparison is bit-exact, not a
+tolerance check.
+
+**Why.** Before this, `main.c` unconditionally ran `nn_argmax` on the final
+layer and reported it as "class" for every model. For workload A that number
+means something. For workload B's autoencoder it is an index into a
+reconstructed vector — a number with no meaning, computed and reported as if
+it were a result. This is exactly the kind of silent nonsense this project's
+bit-exactness discipline exists to prevent (see the project rules on never
+reporting a class from a model that was not measuring one). `sweep/run_sweep.py`
+was updated to match: its correctness gate now reads `golden["task"]` and
+compares `reconstruction_mae` for an autoencoder rather than a `class` field
+the firmware never prints for that task — which, unfixed, would have marked
+every workload_b sweep row "WRONG ANSWER" even when it was correct, for a
+reason having nothing to do with the hardware.
+
+---
+
+## D020 — Verilator's generated Makefile breaks on a space in the repo path
+
+**Decision.** `sweep/run_sweep.py::space_free_root()` detects a space in
+`ROOT` and builds through a symlink at a fixed, space-free location
+(`/tmp/riscv_inference_accelerator_root`) instead.
+
+**Why.** The repository now lives at
+`.../Downloads/Science Fair/riscv-inference-accelerator` — moved there after
+this project's Verilator harness was built, and outside this script's
+control. Verilator's `--build` step generates a `Vsoc_top.mk` that lists its
+source files space-separated and unquoted; a space anywhere in the path
+splits one filename into two bogus Make targets, and the build fails with
+"No rule to make target '.../Science'" — a message that gives no hint the
+real cause is a space three directories up. **This silently blocked every
+sweep run from this machine**, for both workloads, not only the new one:
+re-running any previously-recorded sweep cell from this location would have
+failed the same way before this fix. Confirmed fixed by re-running the
+4×4/wbuf=256/int8/workload_a cell and getting the exact previously-recorded
+cycle count (52,051,049) back. iverilog and the host `cc` builds are
+unaffected — this is specific to Verilator's own generated Makefile, not to
+how Python invokes subprocesses.
+
+**How to apply.** If the sweep ever reports a bewildering "No rule to make
+target" error again, check whether `ROOT` has grown a space in it before
+suspecting the RTL. The symlink workaround makes this transparent going
+forward; it does not need to be re-applied by hand.
+
+---
+
+## D021 — RQ5 preliminary timing: MAC fraction and the strategy reversal
+
+**Decision.** With workload B's pipeline fixed (D018, D019) and the sweep
+runnable again (D020), a handful of configurations were run to get a first,
+honest reading on RQ5 before committing to a full sweep. Recorded here
+because the finding changes what the full sweep should prioritize.
+
+**What was measured** (synthetic weights — timing only, not accuracy; see
+D012 for why timing remains valid regardless):
+
+| Quantity | Workload A | Workload B |
+|---|---|---|
+| Baseline MAC fraction | 99.48% | 99.8% |
+| Baseline cycles | 263,729,703 | 5,680,598 |
+| `dot4` vs baseline | 0.98× (slower) | **5.75×** |
+| Best array (4×4/256) vs baseline | 5.07× | 5.33× |
+| 8×8 vs 4×4 array | worse | worse (**confirms** D-level finding, not a workload-A fluke) |
+
+**Two findings, and they point in different directions.**
+
+1. **The array-width optimum replicates.** 8×8 underperforming 4×4 was the
+   single most surprising result on workload A. Seeing it again, independently,
+   on a structurally different model with a different arithmetic profile is
+   real evidence it is a property of the operand-delivery path (see the array
+   width finding elsewhere in this doc / README), not an artifact of one
+   convolution's shape.
+
+2. **The `dot4` vs. array ranking reverses.** On workload A, `dot4` was the
+   *worst* variant (slower than doing nothing). On workload B it is the
+   *best* — beating even the tuned array. This is not noise: `dot4` needs
+   four CONTIGUOUS int8 values to pack into its operand word. A 3×3
+   convolution's reduction is only 3 wide, so `dot4` mostly falls back to
+   scalar work on workload A. An FC layer's reduction is fully contiguous
+   end to end (128, 32, 8, 32 elements), which is exactly `dot4`'s best case.
+   This is the mechanistic explanation workload_b.yaml's header predicted in
+   advance ("fully-connected layers have long contiguous reductions... if the
+   accelerator helps both, the generality claim means something") — it is
+   not a post-hoc rationalization.
+
+**What this is not.** Six configurations, not a sweep — no ANOVA, no
+variance decomposition, no accuracy (weights are random). RQ5 is not
+answered by this entry. It is a reason to run dot4 as a genuine arm of the
+full workload-B sweep rather than treating it as workload A's already-settled
+loser, and a reason the "does the *strategy that wins* generalize" question
+may be more interesting than "does the *speedup number* generalize."
+
+---
+
 ## TODO_BLOCKED items
 
 These could not be completed and are **not** worked around with invented data.
@@ -376,10 +502,19 @@ Vivado is not installed on the development machine, so no LUT/FF/DSP/BRAM or
 Fmax figures exist. `sweep/vivado/build.tcl` and the Arty A7-100T constraints
 are written but **have never been run**. Treat the first run as bring-up.
 
-### TB004 — No RISC-V cross-compiler on the development machine
-`sw/` is written and its host build is clean under `-Wall -Wextra -Werror`,
-but the `.hex` firmware has never been cross-compiled. The SoC has been proven
-to boot and execute using hand-assembled firmware instead (see D011).
+### TB004 — RESOLVED 2026-08-29: cross-compiler installed
+~~No RISC-V cross-compiler on the development machine.~~ The xPack prebuilt
+toolchain is installed at
+`~/.local/xpack/xpack-riscv-none-elf-gcc-15.2.0-1/bin/riscv-none-elf-gcc`
+and all three firmware variants cross-compile cleanly. Every cycle count in
+the sweep comes from real compiled firmware, not hand-assembled stubs. Add the
+toolchain to `PATH` before building:
+
+```
+export PATH="$HOME/.local/xpack/xpack-riscv-none-elf-gcc-15.2.0-1/bin:$PATH"
+```
+
+Kept here rather than deleted so the record shows when the blocker lifted.
 
 ### TB005 — Workload B exceeds on-chip memory at full size
 The full 512-dim autoencoder is ~139k weights, which does not fit in 64 KB
@@ -387,3 +522,10 @@ alongside activations and stack. `workload_b.yaml` therefore carries a
 `deployed_model` block (~8.8k weights) for firmware, keeping the full model as
 a host-only accuracy reference. **Report both, and be explicit about which
 was measured.**
+
+**Status 2026-09-05: the deployed_model path now actually works end to end**
+(see D018–D021). Firmware built, bit-exact against the Python reference, and
+timing measured on real RTL — but this note about the two different model
+sizes still applies whenever a real accuracy number is eventually computed
+from the full model on the host and needs to be reported alongside firmware
+timing from the deployed one.

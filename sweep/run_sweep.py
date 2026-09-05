@@ -93,6 +93,40 @@ CSV_COLUMNS = [
 # result (docs/REVIEW.md, addendum 2), and the only reason it was caught is
 # that something checked the output against a golden reference.
 
+def space_free_root() -> str:
+    """A path to this repo containing no whitespace, for Verilator's --build.
+
+    Verilator's generated Vsoc_top.mk lists source files space-separated and
+    unquoted. If ROOT itself contains a space (this repo currently lives
+    under ".../Science Fair/riscv-inference-accelerator" -- it did not when
+    the sweep was first built, and moving it is outside this script's
+    control), that source list silently splits into two bogus Make targets
+    and every configuration in the sweep fails with a "No rule to make
+    target" error whose target is half a real path. iverilog and gcc are
+    unaffected -- this is specific to verilator's own generated Makefile, not
+    to Python's subprocess handling (which passes argv correctly either way).
+
+    Rather than require a specific directory name, work around it with a
+    symlink at a fixed, space-free location and build through that instead.
+    The symlink is recreated if it ever points somewhere stale.
+    """
+    if " " not in ROOT:
+        return ROOT
+    link = "/tmp/riscv_inference_accelerator_root"
+    target = os.path.realpath(ROOT)
+    if os.path.islink(link):
+        if os.path.realpath(link) != target:
+            os.remove(link)
+            os.symlink(target, link)
+    elif os.path.exists(link):
+        raise RuntimeError(
+            f"{link} exists and is not the symlink the Verilator build "
+            f"needs -- remove it manually and re-run.")
+    else:
+        os.symlink(target, link)
+    return link
+
+
 def tool_version(cmd: list[str], pattern: str = r"([\d.]+)") -> str:
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
@@ -120,51 +154,59 @@ def workload_dims(workload: str) -> tuple[int, int, int]:
 def build_verilator(array_h: int, array_w: int, wbuf: int, abuf: int,
                     precision: int, objdir: str) -> tuple[bool, str]:
     """Compile a Verilator simulator for one RTL configuration."""
+    broot = space_free_root()  # see its docstring -- works around a
+                               # Verilator Makefile bug when ROOT has a space
     cmd = [
         "verilator", "--cc", "--exe", "--build", "-j", "0",
         "-O3", "--x-assign", "fast", "--x-initial", "fast",
         "--top-module", "soc_top",
         "-Wno-fatal",
-        "-I" + os.path.join(ROOT, "rtl"),
+        "-I" + os.path.join(broot, "rtl"),
         "-GCLKS_PER_BIT=4",
         f"-GARRAY_H={array_h}", f"-GARRAY_W={array_w}",
         f"-GWBUF_DEPTH={wbuf}", f"-GABUF_DEPTH={abuf}",
         f"-GPRECISION={precision}",
         "--Mdir", objdir,
-    ] + [os.path.join(ROOT, "rtl", f) for f in RTL_FILES] + [
-        os.path.join(ROOT, "third_party", "picorv32", "picorv32.v"),
-        os.path.join(ROOT, "sim", "verilator", "tb_soc.cpp"),
+    ] + [os.path.join(broot, "rtl", f) for f in RTL_FILES] + [
+        os.path.join(broot, "third_party", "picorv32", "picorv32.v"),
+        os.path.join(broot, "sim", "verilator", "tb_soc.cpp"),
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    res = subprocess.run(cmd, capture_output=True, text=True, cwd=broot)
     if res.returncode != 0:
         return False, res.stderr[-500:]
     return True, ""
 
 
-def golden_class(workload: str, precision: int = 8) -> int | None:
-    """The classification the Python reference produces for this workload.
+def golden_meta(workload: str, precision: int = 8) -> dict | None:
+    """The Python reference's recorded output for this workload/precision.
 
-    Each precision has its OWN golden vector, because quantizing to int4
-    changes the numbers. Checking an int4 run against the int8 golden would
-    be comparing against the wrong reference.
+    Each (workload, precision) pair has its OWN golden vector: quantizing to
+    int4 changes the numbers, and workload B is a structurally different
+    model, so checking one against another's golden file would be comparing
+    against the wrong reference. Returns the whole metadata dict -- notably
+    "task" ("classify" or "reconstruct") and either "predicted_class" or
+    "expected_reconstruction_mae" -- because run_simulation needs to know
+    WHICH check applies before it knows what to compare against.
     """
     import json
     cfg_path = os.path.join(ROOT, "train", "config", f"{workload}.yaml")
     if not os.path.exists(cfg_path):
         return None
     name = load_config(cfg_path).get("name")
-    gdir = "golden" if precision == 8 else f"golden_int{precision}"
+    wl_suffix = "" if workload == "workload_a" else "_b"
+    prec_suffix = "" if precision == 8 else f"_int{precision}"
+    gdir = f"golden{wl_suffix}{prec_suffix}"
     meta = os.path.join(ROOT, "sim", gdir, f"{name}.json")
     if not os.path.exists(meta):
         return None
     with open(meta) as fh:
-        return json.load(fh).get("predicted_class")
+        return json.load(fh)
 
 
 def run_simulation(array_h: int, array_w: int, wbuf: int, abuf: int,
                    precision: int, workload: str, timeout: int,
                    workdir: str, variant: str = "array",
-                   expect_class: int | None = None) -> dict:
+                   golden: dict | None = None) -> dict:
     """Build and run one configuration, and CHECK IT GOT THE RIGHT ANSWER."""
     objdir = os.path.join(workdir, f"obj_{array_h}_{array_w}_{wbuf}_{precision}")
 
@@ -172,16 +214,28 @@ def run_simulation(array_h: int, array_w: int, wbuf: int, abuf: int,
     if not ok:
         return {"sim_ok": False, "error": "verilator build failed: " + err}
 
-    # Firmware must match the hardware's precision. int4 hardware
-    # sign-extends the low nibble, so it needs a model quantized to int4;
-    # feeding it int8 weights would mis-decode any value outside [-8,7].
-    build_dir = "build" if precision == 8 else f"build_int{precision}"
+    # Firmware must match BOTH the hardware's precision AND the workload
+    # being swept. Getting either wrong is a silent-wrong-answer bug, not a
+    # crash: int4 hardware sign-extends the low nibble, so int8 weights would
+    # mis-decode any value outside [-8,7]; and every workload's firmware
+    # variant is named "baseline.hex"/"dot4.hex"/"array.hex", so loading
+    # workload A's build while labelling the row "workload_b" would produce a
+    # row that runs, completes, and reports someone else's numbers under the
+    # wrong name. This naming scheme mirrors sw/Makefile's MODELS/BUILD
+    # convention (see `make -C sw` -- MODELS=models_b, BUILD=build_b for
+    # workload B) and Makefile's MODELS_DIR/GOLDEN_DIR for `make weights`.
+    wl_suffix = "" if workload == "workload_a" else "_b"
+    prec_suffix = "" if precision == 8 else f"_int{precision}"
+    build_dir = f"build{wl_suffix}{prec_suffix}"
+    models_dir = f"models{wl_suffix}{prec_suffix}"
     fw = os.path.join(ROOT, "sw", build_dir, f"{variant}.hex")
     if not os.path.exists(fw):
         return {"sim_ok": False,
                 "error": f"{build_dir}/{variant}.hex not built -- run "
-                         f"'make -C sw MODELS=models_int{precision} "
-                         f"BUILD={build_dir}'"}
+                         f"'make -C sw MODELS={models_dir} BUILD={build_dir}' "
+                         f"(after 'make weights CONFIG=train/config/{workload}"
+                         f".yaml ...' if {models_dir}/model_weights.h does "
+                         f"not exist yet -- see the top-level Makefile)"}
 
     dst = os.path.join(ROOT, "sim", "build", "firmware.hex")
     os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -215,8 +269,25 @@ def run_simulation(array_h: int, array_w: int, wbuf: int, abuf: int,
     accel_macs = fields.get("accel_macs", 0)
     peak = array_h * array_w * max(accel_cycles, 1)
 
-    got_class = fields.get("class")
-    correct = (expect_class is None) or (got_class == expect_class)
+    # The correctness check differs by TASK, not just by workload: a
+    # classifier's firmware reports "class" (see sw/src/main.c's
+    # MODEL_TASK_CLASSIFY branch); an autoencoder reports "reconstruction_mae"
+    # instead, because an index into a reconstruction vector isn't a
+    # meaningful answer to check. Comparing the wrong field would either
+    # crash (KeyError-shaped None mismatch) or, worse, silently mark every
+    # workload_b row "WRONG ANSWER" because "class" is never printed for a
+    # reconstruction task -- which is exactly the kind of fast-and-wrong
+    # result this check exists to catch, just aimed at itself instead of the
+    # hardware. Both comparisons are bit-exact (deterministic integer
+    # arithmetic on both sides), never a tolerance.
+    task = (golden or {}).get("task", "classify")
+    if task == "reconstruct":
+        expect_val = (golden or {}).get("expected_reconstruction_mae")
+        got_val = fields.get("reconstruction_mae")
+    else:
+        expect_val = (golden or {}).get("predicted_class")
+        got_val = fields.get("class")
+    correct = (expect_val is None) or (got_val == expect_val)
 
     return {
         "sim_ok": True,
@@ -229,8 +300,8 @@ def run_simulation(array_h: int, array_w: int, wbuf: int, abuf: int,
         "accel_busy_fraction": round(accel_cycles / max(cycles, 1), 6),
         "stall_fraction": round(fields.get("accel_stalls", 0)
                                 / max(accel_cycles, 1), 6),
-        "predicted_class": got_class,
-        "expected_class": expect_class,
+        "predicted_class": got_val,
+        "expected_class": expect_val,
         # A configuration that is fast and WRONG must never be reported as
         # fast. This flag is what stops that happening at scale.
         "result_correct": correct,
@@ -378,9 +449,10 @@ def main() -> int:
     print(f"  output:    {out_csv}")
     print()
 
-    wl_golden = {(wl, pr): golden_class(wl, pr)
+    wl_golden = {(wl, pr): golden_meta(wl, pr)
                  for wl in workloads for pr in precisions}
-    print(f"  golden classes: {wl_golden}")
+    print(f"  golden references: "
+          f"{ {k: (v or {}).get('predicted_class', (v or {}).get('expected_reconstruction_mae')) for k, v in wl_golden.items()} }")
     print(f"  firmware variant: {VARIANT}")
     print()
 

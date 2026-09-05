@@ -264,3 +264,36 @@ hypothesis.
 "buffering did not interact with width, contrary to our prediction" — is a
 genuine contribution and far better science than quietly changing the
 hypothesis.
+
+---
+
+## UPDATE — RQ5 firmware working, six configurations spot-checked (2026-09-05)
+
+Workload B's pipeline had two bugs that silently built the wrong model (see
+D018–D019 in DECISIONS.md) and the whole sweep was blocked by an unrelated
+environment bug (D020). All three are fixed. Firmware for workload B is now
+bit-exact against the Python reference (`train/verify_parity.py`, all three
+model variants pass), and six cells were run to sanity-check the pipeline
+before committing to the full factorial.
+
+**The pre-registered prediction was "direction of effects is preserved;
+magnitudes differ." The result is more interesting than that binary allows
+for**, because it depends on which effect:
+
+- The **array-width effect's direction is preserved**: 8×8 loses to 4×4 on
+  workload B exactly as it did on workload A. By the falsification criterion
+  above ("effects reverse direction"), this effect is **not falsified**.
+- The **relative ranking of `dot4` vs. the array reverses outright**: `dot4`
+  was workload A's worst variant and is workload B's best. This was not one
+  of the effects the falsification table anticipated by name — the table was
+  written expecting "generalizes with different magnitude" or "generalizes
+  with the wrong sign," not "the identity of the best strategy changes
+  entirely." That gap is itself worth recording: the pre-registration did not
+  anticipate this particular way for the workloads to differ.
+
+Full numbers and the mechanistic explanation (contiguous-operand requirements
+of `dot4` vs. an FC layer's fully contiguous reduction) are in D021 and in
+the README's RQ5 section. **This is not a sweep** — six configurations, no
+ANOVA, and accuracy remains synthetic. The honest summary is: proceed to the
+full workload-B factorial with `dot4` included as a real arm, not a foregone
+loser.

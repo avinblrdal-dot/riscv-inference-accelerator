@@ -102,17 +102,32 @@ def synthetic_model(cfg: dict, seed: int) -> dict:
     rng = np.random.default_rng(seed)
     layers = []
 
-    inp = cfg["input"]
-    in_ch = inp.get("channels", 1)
-    h = inp.get("n_mels", inp.get("n_bins", 32))
-    w = inp.get("n_frames", 1)
+    # fc_autoencoder (workload B) is deployed as the REDUCED `deployed_model`
+    # block, not the full architecture under `model.layers` -- the full
+    # version is ~139k weights and does not fit in the SoC's 64 KB of RAM
+    # (see train/config/workload_b.yaml and train/models.py::_build_autoencoder,
+    # which already makes this distinction for the training path). Building
+    # from `model.layers` here would quantize a model that can never be
+    # exported to firmware, silently.
+    is_autoencoder = cfg["model"]["architecture"] == "fc_autoencoder"
+    if is_autoencoder:
+        dep = cfg.get("deployed_model")
+        if dep is None:
+            raise ValueError(
+                "workload config has architecture 'fc_autoencoder' but no "
+                "'deployed_model' block")
+        layer_specs = dep["layers"]
+        cur_flat = dep["input_dim"]
+        in_ch = h = w = None  # unused on this path
+    else:
+        layer_specs = cfg["model"]["layers"]
+        inp = cfg["input"]
+        in_ch = inp.get("channels", 1)
+        h = inp.get("n_mels", inp.get("n_bins", 32))
+        w = inp.get("n_frames", 1)
+        cur_flat = None
 
-    # For the fully-connected workload the "spatial" size is 1 and the input
-    # is a flat vector.
-    flat_dim = inp.get("n_bins", h * w) if cfg["model"]["architecture"] == "fc_autoencoder" else None
-    cur_flat = flat_dim
-
-    for spec in cfg["model"]["layers"]:
+    for spec in layer_specs:
         kind = spec["type"]
         if kind == "conv":
             k = spec["kernel"]
