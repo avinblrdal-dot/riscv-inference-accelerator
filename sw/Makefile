@@ -128,6 +128,27 @@ $(eval $(call BUILD_VARIANT,baseline,BASELINE))
 $(eval $(call BUILD_VARIANT,dot4,DOT4))
 $(eval $(call BUILD_VARIANT,array,ARRAY))
 
+# --- matrix-multiply benchmark (sw/bench/matmul.c) -------------------------
+# Standalone: no model header, no quant.c. Two images, like the variants
+# above: matmul_cpu (baseline + DOT4, never touches the array) and
+# matmul_array. Run by sweep/run_matmul_sweep.py.
+define BUILD_BENCH
+$(BUILD)/$(1).elf: check-toolchain | $(BUILD)
+	$$(CC) $$(CFLAGS) -D$(2) $$(LDFLAGS) start.S bench/matmul.c \
+	  $$(LDLIBS) -o $$@
+	@echo "  built $$@"
+
+$(BUILD)/$(1).hex: $(BUILD)/$(1).elf
+	$$(OBJCOPY) -O verilog --verilog-data-width=4 $$< $$@
+	@echo "  hex   $$@"
+endef
+
+$(eval $(call BUILD_BENCH,matmul_cpu,BENCH_CPU))
+$(eval $(call BUILD_BENCH,matmul_array,BENCH_ARRAY))
+
+.PHONY: matmul
+matmul: $(BUILD)/matmul_cpu.hex $(BUILD)/matmul_array.hex
+
 # --- host build, for parity testing ---------------------------------------
 # No cross-compiler needed. train/verify_parity.py builds its own harness the
 # same way; this target just proves the sources compile cleanly for the host.

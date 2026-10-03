@@ -9,6 +9,142 @@ section matters most.
 
 ---
 
+## 2026-10-02 (later) — Handpump direction confirmed; matrix-multiply experiment run; hardware bug found and fixed
+
+**Who:** Avin recording. Code and runs done with Claude's help in this session.
+
+**Decision confirmed.** Ishaan and Prabhav both confirmed the off-grid
+handpump direction. The open item from the entry below is closed. README,
+ABSTRACT, and EXPERIMENT_PLAN are now updated for it (DECISIONS.md D023). The
+research questions, factors, and every measured number are unchanged.
+
+**What we did: Dr. Bhatia's matrix-multiply experiment.** He asked at what
+data-chunk size the speedup stops improving. We wrote a plain matrix-multiply
+benchmark (`sw/bench/matmul.c`) and ran it on all 16 array/buffer
+configurations under Verilator (`sweep/run_matmul_sweep.py`). That made 322
+measurements, and **every one matched Python's answer** by checksum. Logged as
+exploratory (D024), because it was not in the pre-registered plan.
+
+**What we found** (16×16 output, speedup vs plain RISC-V):
+
+| K (values per output) | 16 | 64 | 128 | 256 | 512 | 1024 |
+|---|---|---|---|---|---|---|
+| 4×4, 64-word buffer | 28.0× | 43.9× | 32.2× | 33.0× | 33.5× | 33.6× |
+| 4×4, 256-word buffer | 28.0× | 43.9× | 50.6× | 53.9× | 35.2× | 35.3× |
+| 4×4, 1024-word buffer | 28.0× | 43.9× | 50.6× | 53.9× | 56.0× | 56.7× |
+| DOT4 | 15.6× | 15.3× | 15.7× | 15.8× | 15.8× | 15.8× |
+
+- Speedup climbs until the data stops fitting in the buffer, then drops, at
+  exactly the buffer size, every time. That is the direct answer to his
+  question.
+- Even with a big enough buffer, the gains shrink and flatten near 57×.
+- 4×4 beats 8×8 again. That is the third time (workload A, workload B, matmul).
+- The same hardware gets about 57× on a matmul but about 5× on our neural
+  networks, because those use only one row of the array.
+
+**What broke: a real hardware bug.** Every run with K = 64 on a 64-word buffer
+froze, but K = 63 and 65 were fine. We printed the accelerator's status after
+the freeze. The job had finished, but the "done" flag read 0. Cause: if the
+job finishes in the same clock cycle the CPU reads STATUS, the "set done" and
+"clear done" collide, and the clear wins, so the CPU never finds out. The fix
+is one line in `rtl/accel_top.v` (D022).
+
+Checked that it did not affect old results. No old sweep row ever had a
+timeout. `make test` still passes. And five old configurations re-ran to the
+exact same cycle counts (52,051,049 for 4×4/256; 96,481,903 for 1×1/16, and
+three others).
+
+**Numbers:** in `sweep/results/MATMUL_SUMMARY.md` (tables) and
+`sweep/results/matmul_results.csv` (every row, regenerable). Chart:
+`python3 analysis/plot_matmul.py`.
+
+**Next:**
+1. Show the chart to Dr. Bhatia at the next meeting (asked for Oct 10–13).
+2. Real data: install PyTorch, download MIMII pump recordings, and train
+   workload B for a first real accuracy number.
+3. Hardware: power profiler, plus a board through the school, Digilent, or AMD.
+
+---
+
+## 2026-10-02 — CATCH-UP ENTRY: Sept 8 meeting with Dr. Bhatia, and a change of direction (written 24 days late)
+
+**Who:** Avin recording. Dr. Dinesh Bhatia (Department Head, ECE, UT Dallas) met
+with the team on Sept 8, 7:30 PM, over MS Teams. Invited: Ishaan, Prabhav, Avin.
+Who actually attended is not recorded here -- confirm.
+
+**This entry is late and secondhand.** TEMPLATE.md says to write entries as you
+work. This one was written after the fact, from Avin's rough notes taken during
+the call and from the chat sessions that followed. The feedback below is
+**paraphrased from fragmentary notes, not verbatim** -- check it against what
+Ishaan and Prabhav remember before quoting it anywhere. No measurements were
+taken. Repo HEAD is unchanged since 2026-09-05 (`ada4e07`).
+
+**What happened at the meeting (as relayed):**
+- It was a first, exploratory meeting. He had agreed only to meet "to understand
+  your ideas"; he has not agreed to mentor us.
+- **Feedback 1 -- the big one.** Bringing more data in and running more units in
+  parallel to go faster is what the whole field does every day (Nvidia, Google,
+  everyone). It is not unique, and proving it again is not our contribution.
+  His suggestion: pick a very niche, unique application and show how this helps
+  *there*.
+- **Question:** at what size of data chunk does performance start to decrease?
+- **Suggestion:** we could answer that simply on large matrix multiplications,
+  instead of through our two AI models.
+- **Application idea raised:** a low-cost health-monitoring device, with a note
+  that other solutions may exist.
+
+**Direction change (stated intent, NOT yet confirmed by the team):**
+- After the meeting Avin said he wants to orient the whole project around
+  **off-grid water handpumps**. Ishaan and Prabhav have not confirmed this in
+  any record I can find. Low-cost health monitoring stays on the table as the
+  other candidate until they do.
+- Why it looks stronger than "industrial motors": a real, citable problem, a
+  genuinely off-grid battery constraint, and a precedent to differentiate
+  against. Our understanding is that EBED is judged on the ISEF *engineering*
+  rubric, where a well-defined real problem is graded -- **verify this against
+  the official ISEF rules before relying on it.**
+- Stats checked by web search (secondary sources -- read the primary documents
+  before citing in the paper):
+  - ~1/3 of handpumps across Africa non-functional at any time (UNICEF Office of
+    Innovation).
+  - Oxford Smart Handpump, Kenya: average repair time 27 -> 3 days (89% within
+    3 days, 98% uptime).
+  - **Dropped:** a "$1.2-1.5 billion lost investment" figure. Sources disagree by
+    roughly 10x ($1.2B vs $12-15B depending on scope).
+- **Not changed yet, on purpose:** README.md, docs/EXPERIMENT_PLAN.md and
+  docs/ABSTRACT.md still describe the industrial-motor framing. They should not
+  be rewritten until the team confirms the direction.
+
+**Things produced since (outside the repo, in ~/Downloads/Science Fair/):**
+- Sept 8: call script and roadmap (.docx), a 9-slide conversational deck, and a
+  6-page PDF plus 15-slide deck written for Dr. Bhatia.
+- **The PDF/deck for Dr. Bhatia frame the application as "two candidates, not
+  decided."** If the team commits to handpumps, that framing is out of date.
+- Sept 19: follow-up email to Dr. Bhatia drafted (asks whether he reviewed the
+  attachments, and whether his lab has spare hardware). Whether it was sent, and
+  whether he replied, is not recorded.
+- Oct 2: started researching who to ask for hardware discounts or donations.
+  Early finding: the AMD University Program donation route is open to university
+  faculty/researchers only, so it would have to go through Dr. Bhatia.
+
+**What broke / open questions:**
+- **Process failure:** no notebook entry for 24 days, and no commits since
+  Sept 5. This entry breaks the "write it as you work" rule; it exists to repair
+  the record, not to excuse the gap.
+- The meeting's feedback lived only in chat until now.
+- Unknown, and needs an answer from the team: has any hardware been ordered
+  (Arty A7-100T, power profiler)? Has Vivado been started? Were the school-fair
+  dates and ISEF forms sorted (the original Phase 00 items)? Did Dr. Bhatia reply?
+- Not done: the matrix-multiplication chunk-size sweep he suggested has not been
+  started.
+
+**Next step:**
+- Get Ishaan and Prabhav to confirm (or reject) the handpump direction. Only
+  then update README / EXPERIMENT_PLAN / ABSTRACT and re-send Dr. Bhatia an
+  updated report.
+
+---
+
 ## 2026-09-05 — Workload B built end to end; RQ5 firmware working; found a bug blocking every sweep
 
 **Goal:** Get workload B (the FFT autoencoder) through the same pipeline

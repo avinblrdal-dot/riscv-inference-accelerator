@@ -16,37 +16,40 @@ Convention used below:
 
 ## Draft
 
-> A RISC-V Accelerator Architecture for Multi-Year Battery-Powered Machine
-> Condition Monitoring at the Edge
+*Redrafted 2026-10-02 for the off-grid handpump application (DECISIONS.md
+D023). The previous industrial-monitoring draft is in git history.*
 
-General-purpose processors are architected for branching, unpredictable code,
-while neural inference is a single arithmetic pattern executed at high volume.
-This mismatch is structural rather than incidental, and it appears as energy
-spent on instruction overhead rather than useful computation. Because energy
-per inference determines whether a sensor node can operate unattended, that
-overhead sets a limit on where on-device intelligence can be deployed at all.
-Machine condition monitoring illustrates the constraint: rotating equipment
-across industrial and water infrastructure is largely unmonitored because cost
-per monitoring point, driven by maintenance visits, exceeds what most
-deployments support.
+> A RISC-V Accelerator for Multi-Year, Battery-Powered Failure Detection in
+> Off-Grid Water Handpumps
 
-An open-source RISC-V core was implemented on an Artix-7 FPGA and profiled
-running an int8-quantized fault classifier. Baseline profiling showed
-**99.48%** `[M]` of cycles fell within multiply-accumulate operations,
-establishing a theoretical speedup ceiling of **191×** `[M]`. A custom
-dot-product instruction and a **4 × 4** `[M]` accumulator array with local
-weight buffering were designed in Verilog and integrated through the core's
-coprocessor interface. Energy was measured by direct current sensing rather
-than estimated.
+Roughly one in three handpumps in sub-Saharan Africa is broken at any given
+time, and repairs often wait weeks because no one knows a pump has failed. A
+sensor that detects failure on the pump itself could shorten that wait, but
+only if it runs for years on a battery with no grid power and no maintenance
+visits. Energy per inference decides whether on-device detection is
+deployable at all.
 
-The accelerated design reduced inference energy from `__` to `__` mJ (`__`×)
-at a cost of `__` additional LUTs and `__` DSP slices, with classification
-accuracy unchanged at `__`%. Comparable gains on a second, unrelated workload
-(`__`×) indicate the result is not model-specific. Sweeping array width and
-quantization width mapped the energy, accuracy, and area tradeoff and
-identified `__` as the minimum-energy configuration meeting target accuracy.
-Results are reported as energy per operation so they remain applicable beyond
-the models tested.
+A general-purpose processor spends most of that energy on instruction overhead
+rather than useful arithmetic. An open-source RISC-V core with no hardware
+multiplier was profiled running int8 neural networks: **99.48%** `[M]` of
+baseline cycles fell inside multiply-accumulate loops, a theoretical speedup
+ceiling of **191×** `[M]`. A custom dot-product instruction and a parameterized
+multiply-accumulate array with local buffering were designed in Verilog,
+attached through the core's coprocessor interface, and verified bit-exact
+against a Python reference.
+
+Across a full-factorial sweep of array width, buffer depth, and precision, the
+best array configuration reached **5.07×** `[M]` on a vibration fault
+classifier, while the dot-product instruction reached **5.75×** `[M]` on an
+anomaly detector, showing that the best design depends on the workload's
+shape. On an Artix-7 FPGA, inference energy fell from `__` to `__` mJ (`__`×)
+at a cost of `__` LUTs, with detection accuracy of `__`% on `__` data. At that
+energy, a `__` battery would sustain `__` years of monitoring at one inference
+every `__`.
+
+*Word count of the quoted draft, title included, not counting the `[M]`
+markers: about 239. The cap is 250, and filled-in blanks add words, so expect
+to trim when the numbers arrive.*
 
 ---
 
@@ -58,7 +61,8 @@ the models tested.
 | Amdahl ceiling | 191× | derived from the above |
 | Best array geometry | 4 × 4 | 32-config sweep |
 | Best buffer depth | 256 words | 32-config sweep |
-| Cycle speedup, best config | 5.07× | sweep vs baseline |
+| Cycle speedup, best config (workload A) | 5.07× | sweep vs baseline |
+| Cycle speedup, workload B (DOT4) | 5.75× | RQ5 preliminary, 6 configs (D021) |
 | Fraction of ceiling reached | **2.7%** | 5.07 / 191 |
 | Configurations verified correct | 32 / 32 | golden-vector check |
 
@@ -76,8 +80,8 @@ a hole.
 |---|---|
 | Inference energy, before and after | Nordic PPK2 + Arty A7-100T |
 | LUT / DSP area cost | Vivado synthesis (`sweep/vivado/build.tcl`, never yet run) |
-| Classification accuracy | Real MIMII / CWRU data — weights are currently synthetic |
-| Second-workload speedup | Workload B firmware (RQ5, not started) |
+| Detection accuracy, and which data | Real data — weights are currently synthetic. No public handpump dataset is known; MIMII's pump recordings are the closest stand-in (industrial pumps, not handpumps -- say so) |
+| Battery-life sentence | Needs the measured energy, a chosen battery, and a chosen inference rate |
 | Minimum-energy configuration | Requires the energy column, not the cycle column |
 
 ## Rules for filling this in

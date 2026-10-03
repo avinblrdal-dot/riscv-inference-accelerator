@@ -380,7 +380,20 @@ module accel_top #(
                 end else begin
                     case (reg_sel)
                         `ACCEL_REG_STATUS: begin
-                            mem_rdata  <= {29'd0, !fifo_empty, done_latch, ctrl_busy};
+                            // `| ctrl_done` closes a lost-done race. If the
+                            // job finishes in the SAME cycle as this read,
+                            // the set above and the clear below land in one
+                            // clock edge and the later nonblocking assignment
+                            // (the clear) wins -- while the read returns the
+                            // old, still-zero latch. The done pulse is gone
+                            // and software polls forever. Found by the matmul
+                            // benchmark (K = 64 on a 64-word buffer hung every
+                            // time; K = 63 never did). Reporting ctrl_done
+                            // directly means a pulse that coincides with the
+                            // read is delivered by that read, so clearing the
+                            // latch loses nothing. docs/DECISIONS.md D022.
+                            mem_rdata  <= {29'd0, !fifo_empty,
+                                           done_latch | ctrl_done, ctrl_busy};
                             done_latch <= 1'b0;   // read-to-clear
                         end
                         `ACCEL_REG_M:      mem_rdata <= {16'd0, dim_m};

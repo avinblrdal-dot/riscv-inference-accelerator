@@ -297,3 +297,25 @@ the README's RQ5 section. **This is not a sweep** — six configurations, no
 ANOVA, and accuracy remains synthetic. The honest summary is: proceed to the
 full workload-B factorial with `dot4` included as a real arm, not a foregone
 loser.
+
+## UPDATE — application change and one exploratory experiment (2026-10-02)
+
+**Application changed; the experiment did not.** The application anchor moved
+from industrial machine monitoring to off-grid water handpumps (DECISIONS.md
+D023). Nothing in this plan's statistical design depends on the application:
+the research questions, factors, levels, hypotheses, thresholds, and analysis
+model all stand exactly as written above. What changes is which data the
+eventual accuracy numbers come from (MIMII pump recordings as a stand-in, since
+no public handpump dataset is known) and that workload B, the anomaly detector,
+becomes the more natural deployed model.
+
+**One exploratory experiment added: the matrix-multiply benchmark (D024).**
+Suggested by Dr. Bhatia: find the data-chunk size at which the speedup stops
+improving. It is labelled exploratory because it was added after this plan was
+written. It has no pre-registered hypothesis, so it gets descriptive results
+(tables and plots), not significance tests. Results are in
+`sweep/results/MATMUL_SUMMARY.md`.
+
+Building it surfaced a real hardware bug, a lost-done race in the STATUS
+register (D022). It was fixed, and the fix was verified not to change any
+previously recorded result.

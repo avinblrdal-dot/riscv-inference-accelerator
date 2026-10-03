@@ -26,8 +26,8 @@ optimised away — only architected away.
 
 This matters because energy per inference determines whether a battery-powered
 sensor can run unattended for years, which determines cost per deployed node,
-which determines how many machines get monitored at all. The overhead is a
-binding limit on where always-on intelligence can be deployed.
+which determines how many off-grid water pumps can be monitored at all. The
+overhead is a binding limit on where always-on intelligence can be deployed.
 
 **The contribution is not "we built an accelerator."** Accelerating MACs is
 well understood. The contribution is an *open, reproducible characterization*
@@ -47,10 +47,28 @@ workloads, and reported in transferable units (pJ/MAC).
 | **RQ4** | How far can precision be reduced (int8 → int4) before accuracy degrades, and how does precision interact with array width and buffer depth? |
 | **RQ5** | Do the gains generalize to a structurally different workload? |
 
-**Application anchor:** machine condition monitoring — classifying motor and
-pump acoustic/vibration data as `normal`, `imbalance`, `misalignment`, or
-`bearing_fault`. Chosen because its energy constraint is the most severe: a
-sensor bolted to a pump cannot be recharged.
+**Application anchor (changed 2026-10-02): failure detection for off-grid
+community water handpumps.** Roughly one in three handpumps in sub-Saharan
+Africa is not working at any given time, and repairs often wait weeks because
+nobody knows the pump has failed. Adding sensing to the pump itself has been
+shown to cut that wait sharply (the Oxford Smart Handpump work reported repair
+times falling from about 27 days to about 3). *Check both figures against their
+original sources before quoting them.* A sensor on a handpump has no grid
+power and should run for years without a visit, so energy per inference is the
+binding constraint, which is exactly what this project measures.
+
+The two workloads map onto it directly:
+
+- **Workload A**, a vibration fault classifier (currently `normal`,
+  `imbalance`, `misalignment`, `bearing_fault`; the class list will be
+  revisited for handpump failure modes).
+- **Workload B**, an anomaly detector that flags anything unlike normal
+  operation and needs no labelled failure data. This fits handpumps well,
+  because recorded handpump failures are scarce.
+
+Earlier drafts anchored on industrial motor monitoring. Why it changed, and
+what did *not* change (the research questions, the factors, the hypotheses), is
+in [DECISIONS.md](docs/DECISIONS.md) D023.
 
 ---
 
@@ -294,6 +312,35 @@ workload-B sweep, not as a control everyone already expects to lose, and a
 reason "does the *winning strategy* generalize" may be the more interesting
 half of RQ5, separate from "does the *speedup number* generalize."
 
+### Matrix-multiply benchmark — exploratory (MEASURED timing; 322 runs, all verified correct)
+
+Suggested by Dr. Bhatia: at what data-chunk size does the speedup stop
+improving? Plain int8 matrix multiplies were run on all 16 array/buffer
+configurations, with every result checksummed against Python
+([D024](docs/DECISIONS.md); full tables in
+[MATMUL_SUMMARY.md](sweep/results/MATMUL_SUMMARY.md); figures with
+`python3 analysis/plot_matmul.py`). **Exploratory:** added after
+pre-registration, so it gets descriptive results, not significance tests.
+
+| Dot-product length K | 16 | 64 | 128 | 256 | 512 | 1024 |
+|---|---|---|---|---|---|---|
+| 4×4 array, 64-word buffer | 28.0× | **43.9×** | 32.2× | 33.0× | 33.5× | 33.6× |
+| 4×4 array, 256-word buffer | 28.0× | 43.9× | 50.6× | **53.9×** | 35.2× | 35.3× |
+| 4×4 array, 1024-word buffer | 28.0× | 43.9× | 50.6× | 53.9× | 56.0× | **56.7×** |
+| DOT4 instruction | 15.6× | 15.3× | 15.7× | 15.8× | 15.8× | 15.8× |
+
+**The answer: the speedup keeps climbing until the data no longer fits in the
+buffer, then drops, at exactly the buffer size, in every configuration.**
+Past that point the weights must be re-sent instead of loaded once. Even with
+a big enough buffer, each doubling helps less: the curve flattens near 57×.
+
+Two more things stand out. 4×4 beats 8×8 again, the third time this has
+replicated. And the same hardware that reaches 57× here reaches only about 5×
+on the neural networks, because those run one input at a time and use only one
+row of the array. Building this benchmark also exposed a real hardware bug, a
+lost-done race in the STATUS register, which was fixed and confirmed not to
+change any earlier result ([D022](docs/DECISIONS.md)).
+
 ---
 
 ## Quickstart
@@ -414,6 +461,13 @@ rather than by memory:
    ```
 3. `make sweep` — cycle and stall counts for the design space.
 4. `make analysis` — statistics and figures.
+5. Matrix-multiply benchmark (needs the RISC-V cross-compiler and Verilator;
+   about an hour for all 16 configurations):
+   ```
+   make -C sw matmul BUILD=build_matmul
+   python3 sweep/run_matmul_sweep.py
+   python3 analysis/plot_matmul.py
+   ```
 
 Every sweep row records the git SHA, tool versions, frozen config hash and RNG
 seed. Configs are hash-locked by `train/freeze.py`, which **refuses** to run if

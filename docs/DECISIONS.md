@@ -478,6 +478,133 @@ may be more interesting than "does the *speedup number* generalize."
 
 ---
 
+## D022 — Lost-done race in the STATUS register (a hardware bug, found and fixed)
+
+**Decision.** `rtl/accel_top.v` now returns `done_latch | ctrl_done` in the
+STATUS read, instead of `done_latch` alone.
+
+**The bug.** The DONE bit is a sticky latch: set when the controller pulses
+`ctrl_done`, cleared when software reads STATUS. Both happen in the same
+`always` block. If the job finished in the *same clock cycle* that a STATUS
+read was accepted, the set and the clear landed on one edge, and the later
+nonblocking assignment (the clear) won. Meanwhile the read returned the old
+latch value, which was still 0. The done pulse was lost, and the firmware
+polled until its 4-million-poll limit ran out.
+
+**How it was found.** The matmul benchmark (D024) hung on every job with
+K = 64 on a 64-word buffer, and never with K = 63 or 65. Printing STATUS after
+the timeout showed the job had actually finished (accelerator cycle and MAC
+counters complete, results waiting in the FIFO), with DONE reading 0. So the
+hardware finished and the CPU was never told. Whether a job hits the race
+depends only on exact cycle alignment between the controller and the polling
+loop, which is why it looked tied to one size.
+
+**Were earlier results affected? No, and this was checked rather than
+assumed.** A run that hits the race hangs and records a timeout. Every row of
+the existing workload A sweep has `accel_timeouts = 0`, so none of them hit it.
+The fix also only changes behavior in the race cycle itself. Confirmed after
+the fix: `make test` passes, and five workload A configurations (4×4 at all
+four depths, and 1×1/16) re-ran to the exact previously recorded cycle counts.
+
+**How to apply.** This is the third bug in this project caused by two pieces
+of logic disagreeing about a one-cycle pulse (see D008 and D013). Any new
+sticky flag should be read as `latch | pulse`.
+
+---
+
+## D023 — Application changed to off-grid water handpumps
+
+**Decision.** The application anchor is now failure detection for off-grid
+community water handpumps, replacing industrial machine condition monitoring.
+Confirmed by all three team members (Avin, Ishaan, Prabhav) on 2026-10-02.
+
+**Why.** Feedback at the Sept 8 meeting with Dr. Bhatia (notebook, 2026-10-02
+catch-up entry) was that making inference faster through more parallel
+hardware is not new by itself, and that the project needs a specific use where
+the constraint really binds. A handpump sensor has no grid power and should go
+years without a maintenance visit, which makes energy per inference the
+deciding factor. That is the quantity this project measures.
+
+**What did NOT change.** The research questions (RQ1 to RQ5), the factors and
+levels, the hypotheses, the thresholds, and every measured number. Every
+timing result in this repo is independent of the application story. The
+application decides which model and data matter, not how the hardware is
+measured.
+
+**What changes downstream.**
+- Workload B (anomaly detector) becomes the more natural handpump model,
+  because recorded handpump failures are scarce and an anomaly detector
+  trains on normal operation only.
+- No public handpump dataset is known. MIMII's pump recordings are the
+  closest stand-in. They are industrial pumps, and any accuracy number from
+  them must say so.
+- Workload A's class names (`imbalance`, `misalignment`, `bearing_fault`) are
+  motor failure modes. They should be revisited for handpump failure modes
+  before real training.
+- Statistics quoted in the write-up (about 1 in 3 handpumps non-functional;
+  Oxford Smart Handpump repair times of about 27 days falling to about 3) must
+  be checked against their original sources. A dollar figure for the cost of
+  broken pumps was dropped because sources disagree by about 10×.
+
+---
+
+## D024 — Matrix-multiply benchmark (exploratory, added after pre-registration)
+
+**Decision.** Added `sw/bench/matmul.c` and `sweep/run_matmul_sweep.py`: plain
+int8 matrix multiplies (C = A × B) run on the real SoC across all 16 array
+width × buffer depth configurations, with every result checksummed against
+Python.
+
+**Why.** Suggested by Dr. Bhatia on Sept 8: find the size of data chunk at
+which the speedup stops improving, using large matrix multiplications. A
+matmul isolates the question because it has no im2col, ReLU, or
+requantization. It also uses the array's rows, which batch-size-1 neural
+networks cannot (see `nn_fc_array`).
+
+**Status: EXPLORATORY.** This experiment was not in the pre-registered plan
+(EXPERIMENT_PLAN.md) and is not covered by its hypotheses or thresholds.
+Report it as exploratory. Do not run significance tests on it as if it had
+been planned. Results are in `sweep/results/MATMUL_SUMMARY.md`.
+
+**What it measures.** Three slices. `ksweep` sweeps the dot-product length K
+from 8 to 1024 at a 16×16 output. `chunk` forces K = 256 to be fed in chunks
+of 4 to 256 values. `square` sweeps N×N matrices from N = 4 to N = 64. The
+software baseline and DOT4 run once, because they never touch the array.
+
+**Findings (first run, 2026-10-02: 322 measurements, 0 wrong answers).**
+
+1. **The answer to the professor's question: the speedup climbs until the data
+   outgrows the buffer, then drops, at exactly the buffer size, every time.**
+   On the 4×4 array, speedup rises from 18.7× (K = 8) to 43.9× (K = 64). At
+   K = 128 it falls to 32.2× on a 64-word buffer, and stays flat around 33×
+   from there. On a 256-word buffer the same thing happens one step later:
+   53.9× at K = 256, then 35.2× at K = 512. The drop happens because past
+   that point the weights no longer fit, so they must be re-sent for every
+   row group instead of loaded once.
+2. **Even with unlimited buffer, the gains shrink.** With a 1024-word buffer,
+   doubling K adds less each time: 43.9×, then 50.6×, 53.9×, 56.0×, 56.7×.
+   The likely limit is the CPU feeding the array (two 32-bit bus writes per
+   step for 16 multiply-adds). That is a hypothesis, not yet measured.
+3. **Chunk size alone matters, with diminishing returns.** Feeding K = 256 in
+   chunks of 4 gives 16.6× on 4×4. Chunks of 64 give 33.0×, and chunks of 256
+   give 34.6×.
+4. **4×4 beats 8×8 again** (56.7× vs 56.2× at K = 1024, and lower everywhere
+   else). This is the third time, after workloads A and B. Cause: the 32-bit
+   operand path only feeds 4 independent lanes (`accel_lanes()`).
+5. **DOT4 is flat at about 15 to 16×, at every size**, because it has no buffer
+   to outgrow.
+6. **The same hardware gets 57× on a matmul but about 5× on the neural
+   networks.** A matmul uses all 4 rows of the array. The batch-size-1 networks
+   use only row 0, and the CNN also pays im2col overhead. That gap is a result
+   worth reporting: the hardware's potential is about ten times what the
+   current workloads use.
+
+Baseline cost for comparison: about 600 cycles per multiply-add
+(157,187,509 cycles for 262,144 MACs at K = 1024), because every multiply is a
+libgcc call on rv32i.
+
+---
+
 ## TODO_BLOCKED items
 
 These could not be completed and are **not** worked around with invented data.
