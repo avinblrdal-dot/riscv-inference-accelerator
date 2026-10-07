@@ -9,6 +9,92 @@ section matters most.
 
 ---
 
+## 2026-10-06 — On-device learning test: the sensor can teach itself its own pump
+
+**Who:** Avin recording. Code and runs done with Claude's help in this session.
+
+**Why.** We want to take the project further. The idea: after installation,
+the sensor listens to its own pump for a few minutes and adjusts itself. No
+labels, no internet, no engineer. Our own result motivated it: one pump
+(id_04) scored much worse than the others.
+
+**How we tested it fairly.** We trained the model on 3 of the 4 pumps,
+"installed" it on the 4th pump it had never heard, let it learn from a few of
+that pump's normal recordings, and scored it on that pump's test recordings.
+We did this for every pump, 3 times each with different random seeds
+(`train/adapt_experiment.py`, D027).
+
+**Results** (chip's 8-bit math, average of all pumps and seeds):
+- Out of the box: **74.9%**
+- After 1.7 minutes of listening, retraining only the last layer: **77.4%**
+- After 5 minutes: **77.9%**
+- The weak pump: 63.5% to 70.1% (1.7 min), then 72.3% (17 min).
+- One pump got worse: id_02, 81.0% to about 77%. We don't know why yet.
+- Retraining just the last layer works about as well as retraining everything.
+  That's good news for the chip, because last-layer learning is batched matrix
+  math, exactly what our array is best at (57× in the matmul test).
+
+**What broke:** nothing this time. Training is now about 40 seconds per model
+instead of 45 minutes, because the new script skips PyTorch's slow data loader.
+
+**Caveats:** the learning ran on a laptop in normal math. Only the scoring
+used chip math. Industrial pumps, not handpumps. Exploratory, not
+pre-registered.
+
+**Next:** figure out why id_02 got worse. Then make the chip actually do the
+learning step in integer math, and measure how long it takes.
+
+---
+
+## 2026-10-03 — First real accuracy number: pump anomaly detector beats the official baseline at 1/30th the size
+
+**Who:** Avin recording. Code and runs done with Claude's help in this session.
+
+**What we did.** Installed PyTorch and downloaded real pump recordings: the
+DCASE 2020 Task 2 version of MIMII pump (1.03 GB, from Zenodo). We first tried
+the raw MIMII file (7.66 GB), but it downloaded at 150 KB/s, which would have
+taken about 13 hours. The DCASE version is the same recordings, already split
+into train and test by the challenge organisers, and it has an official score
+to beat. We wrote `train/dcase_pump.py` to turn the sound files into the
+model's input. Then we trained workload B (8,904 parameters, frozen settings
+unchanged), converted it to 8-bit with real calibration, and scored it.
+
+**Results** (856 test clips, 456 of them faulty; industrial pumps, NOT
+handpumps):
+
+| | AUC | pAUC |
+|---|---|---|
+| Our model, normal (float) math | 75.96% | 69.45% |
+| **Our model, the chip's 8-bit math** | **75.89%** | **69.48%** |
+| Official DCASE 2020 baseline (~264k parameters) | 72.89% | 59.99% |
+
+- Our model is about 30× smaller and still scores higher on average. It wins
+  on 3 of the 4 pumps and loses badly on one (id_04: 64.0% vs their 88.3%).
+- Going to 8-bit cost only 0.07 points.
+- At a 1% false-alarm rate it catches about 34% of faulty clips.
+- A real faulty pump frame run through the simulated chip gave reconstruction
+  error 14, identical to Python, on baseline, DOT4, and the array.
+
+**What broke.**
+1. Training refused to start: "FROZEN MODEL HAS CHANGED", but we hadn't changed
+   anything. Installing PyYAML changed how the config file gets read (only the
+   description text differs), so its fingerprint changed. Fix: always use the
+   project's own reader (D026). Checked that every real setting is identical.
+2. `quantize.py` never actually calibrated on real data. It always used
+   placeholder ranges. We added `--calib-data` (D025).
+3. Surprise: with real weights, the plain-processor version takes 5,065,309
+   cycles, not 5,680,598. Software multiplication speed depends on the numbers
+   being multiplied. Speedups should be re-measured with real weights.
+
+**Caveats.** One training run (one seed), so there's no spread yet. Industrial
+pumps are not handpumps. Our features (FFT) differ from the baseline's
+(log-mel), not just our model size.
+
+**Next.** Run more seeds for a spread. Look into why id_04 is weak. Get real
+handpump data (the pitcher pump idea).
+
+---
+
 ## 2026-10-02 (later) — Handpump direction confirmed; matrix-multiply experiment run; hardware bug found and fixed
 
 **Who:** Avin recording. Code and runs done with Claude's help in this session.

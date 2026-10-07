@@ -88,14 +88,26 @@ in [DECISIONS.md](docs/DECISIONS.md) D023.
 | Inference energy (µJ) | `TBD_MEASURED` | `TBD_MEASURED` |
 | Cycles per inference | `TBD_MEASURED` | `TBD_MEASURED` |
 | Energy reduction | — | `TBD_MEASURED` |
-| Classification accuracy | `TBD_MEASURED` | `TBD_MEASURED` |
+| Workload A classification accuracy | `TBD_MEASURED` | `TBD_MEASURED` |
+| **Workload B anomaly-detection AUC, real pump recordings** (float model vs int8 on the chip) | **75.96%** | **75.89%** |
 | Additional LUTs | — | `TBD_MEASURED` |
 | Additional DSP slices | — | `TBD_MEASURED` |
 | pJ per MAC | `TBD_MEASURED` | `TBD_MEASURED` |
 
 Blocked on: Nordic PPK2 (energy), Vivado install (area/timing), Arty A7-100T
-(both), MIMII/CWRU datasets (accuracy). All tracked in
+(both), real data for workload A (accuracy). All tracked in
 [DECISIONS.md](docs/DECISIONS.md) under `TODO_BLOCKED`.
+
+**First real-data result (2026-10-03, [D025](docs/DECISIONS.md)).** Workload B,
+the 8,904-parameter anomaly detector that runs on the chip, was trained on the
+MIMII pump recordings (DCASE 2020 Task 2 split; these are *industrial* pumps,
+used as a stand-in because no public handpump dataset exists). On the
+challenge's own test split it scores **75.9% AUC / 69.5% pAUC in int8**. The
+official DCASE 2020 baseline, an autoencoder about 30× larger, scored 72.89% /
+59.99%. Converting to the chip's 8-bit arithmetic cost 0.07 AUC points. A real
+anomalous pump frame run through the simulated chip gives a result identical
+to Python in all three firmware variants. One training run so far, so there is
+no spread yet.
 
 ### RQ1 — answered (MEASURED, cycle-accurate simulation)
 
@@ -461,7 +473,21 @@ rather than by memory:
    ```
 3. `make sweep` — cycle and stall counts for the design space.
 4. `make analysis` — statistics and figures.
-5. Matrix-multiply benchmark (needs the RISC-V cross-compiler and Verilator;
+5. Real-data workload B (needs PyTorch; downloads 1.03 GB; about an hour,
+   mostly training):
+   ```
+   python3 -m venv .venv && ./.venv/bin/pip install torch numpy scipy soundfile scikit-learn
+   # download dev_data_pump.zip from https://zenodo.org/records/3678171 into data/raw/mimii/
+   ./.venv/bin/python train/dcase_pump.py prepare
+   ./.venv/bin/python train/train.py --config train/config/workload_b.yaml \
+       --data data/cache/dcase_pump_train.npz --out-dir train/runs/workload_b_real
+   ./.venv/bin/python train/quantize.py --config train/config/workload_b.yaml \
+       --checkpoint train/runs/workload_b_real/best.pt \
+       --calib-data data/cache/dcase_pump_calib.npz \
+       --out train/runs/workload_b_real/quantized.npz
+   ./.venv/bin/python train/dcase_pump.py evaluate
+   ```
+6. Matrix-multiply benchmark (needs the RISC-V cross-compiler and Verilator;
    about an hour for all 16 configurations):
    ```
    make -C sw matmul BUILD=build_matmul

@@ -105,6 +105,9 @@ def main() -> int:
                     help="default sw/models/model_weights.h")
     ap.add_argument("--golden-dir", default=None,
                     help="default sim/golden/")
+    ap.add_argument("--test-input", default=None,
+                    help=".npy of int8 values to use as the firmware's test "
+                         "input instead of the seeded random one")
     args = ap.parse_args()
 
     cfg = require_frozen(args.config)
@@ -151,9 +154,15 @@ def main() -> int:
     in_shape = (in_ch, in_h, in_w)
 
     # Deterministic test input from the model seed, so the golden vectors are
-    # reproducible from a clean clone by anyone.
-    rng = np.random.default_rng(seed)
-    test_input = rng.integers(-128, 128, size=in_shape).astype(np.int8)
+    # reproducible from a clean clone by anyone -- unless a REAL input is
+    # given (e.g. one quantized pump-sound frame from train/dcase_pump.py),
+    # in which case the firmware's self-check runs on real data.
+    if args.test_input:
+        test_input = np.load(args.test_input).astype(np.int8).reshape(in_shape)
+        print(f"  test input: REAL, from {args.test_input}")
+    else:
+        rng = np.random.default_rng(seed)
+        test_input = rng.integers(-128, 128, size=in_shape).astype(np.int8)
 
     print(f"Running the Python reference over a {in_shape} input...")
     out, captures = run_reference(layers, topology, test_input, in_shape)
@@ -171,7 +180,8 @@ def main() -> int:
         # config's own comment on this choice).
         recon_mae = int(np.mean(np.abs(out.ravel().astype(np.int32)
                                        - test_input.ravel().astype(np.int32))))
-        print(f"  reconstruction MAE vs input (synthetic, meaningless): {recon_mae}")
+        tag = "synthetic, meaningless" if synthetic else "real weights"
+        print(f"  reconstruction MAE vs input ({tag}): {recon_mae}")
     else:
         print(f"  predicted class:  {predicted}")
 

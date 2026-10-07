@@ -198,10 +198,20 @@ def _mini_yaml_with_lists(text: str) -> dict:
 
 
 def load_config(path: str) -> dict:
-    """Load a YAML config file.
+    """Load a YAML config file -- ALWAYS with the built-in parser.
 
-    Uses PyYAML when available and the built-in fallback otherwise, so a
-    missing optional dependency never blocks reproducing a result.
+    This used to prefer PyYAML when it was installed. That made a frozen
+    config's hash depend on which packages happened to be on the machine:
+    the two parsers disagree on the folded `description: >` block (the
+    built-in one keeps '>' and turns the folded lines into stray empty keys),
+    so the same unchanged file hashed differently with and without PyYAML,
+    and train/freeze.py refused to train. Every frozen hash in
+    train/frozen_manifest.json was made with the built-in parser, and every
+    setting that affects a result (layers, scales, seeds, hyperparameters)
+    parses identically under both -- checked field by field, 2026-10-03. So
+    the built-in parser is now used unconditionally. Do NOT "fix" its
+    handling of `>` without creating new config names: that would change
+    the frozen hashes. See docs/DECISIONS.md D026.
     """
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -211,8 +221,6 @@ def load_config(path: str) -> dict:
     with open(path) as fh:
         text = fh.read()
 
-    if _HAVE_YAML:
-        return yaml.safe_load(text)
     return _mini_yaml_with_lists(text)
 
 

@@ -41,14 +41,13 @@ against a Python reference.
 Across a full-factorial sweep of array width, buffer depth, and precision, the
 best array configuration reached **5.07×** `[M]` on a vibration fault
 classifier, while the dot-product instruction reached **5.75×** `[M]` on an
-anomaly detector, showing that the best design depends on the workload's
-shape. On an Artix-7 FPGA, inference energy fell from `__` to `__` mJ (`__`×)
-at a cost of `__` LUTs, with detection accuracy of `__`% on `__` data. At that
+anomaly detector, showing the best design depends on workload shape. On an Artix-7 FPGA, inference energy fell from `__` to `__` mJ (`__`×)
+at a cost of `__` LUTs. On real pump recordings, the 8,904-parameter on-chip detector reached **75.9%** `[M]` AUC, above the official challenge baseline. At that
 energy, a `__` battery would sustain `__` years of monitoring at one inference
 every `__`.
 
 *Word count of the quoted draft, title included, not counting the `[M]`
-markers: about 239. The cap is 250, and filled-in blanks add words, so expect
+markers: about 249 (updated 2026-10-03 after the AUC sentence was added). The cap is 250, and filled-in blanks add words, so expect
 to trim when the numbers arrive.*
 
 ---
@@ -62,7 +61,8 @@ to trim when the numbers arrive.*
 | Best array geometry | 4 × 4 | 32-config sweep |
 | Best buffer depth | 256 words | 32-config sweep |
 | Cycle speedup, best config (workload A) | 5.07× | sweep vs baseline |
-| Cycle speedup, workload B (DOT4) | 5.75× | RQ5 preliminary, 6 configs (D021) |
+| Cycle speedup, workload B (DOT4) | 5.75× | RQ5 preliminary, 6 configs (D021); 5.40× with real weights (D025) |
+| Anomaly-detection AUC, workload B, int8 | 75.9% | MIMII pump, DCASE 2020 split (D025) |
 | Fraction of ceiling reached | **2.7%** | 5.07 / 191 |
 | Configurations verified correct | 32 / 32 | golden-vector check |
 
@@ -80,7 +80,7 @@ a hole.
 |---|---|
 | Inference energy, before and after | Nordic PPK2 + Arty A7-100T |
 | LUT / DSP area cost | Vivado synthesis (`sweep/vivado/build.tcl`, never yet run) |
-| Detection accuracy, and which data | Real data — weights are currently synthetic. No public handpump dataset is known; MIMII's pump recordings are the closest stand-in (industrial pumps, not handpumps -- say so) |
+| ~~Detection accuracy~~ FILLED 2026-10-03: 75.9% AUC on MIMII pump (D025). Still open: real handpump data | Real data — weights are currently synthetic. No public handpump dataset is known; MIMII's pump recordings are the closest stand-in (industrial pumps, not handpumps -- say so) |
 | Battery-life sentence | Needs the measured energy, a chosen battery, and a chosen inference rate |
 | Minimum-energy configuration | Requires the energy column, not the cycle column |
 

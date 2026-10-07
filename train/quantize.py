@@ -196,6 +196,62 @@ def load_torch_checkpoint(path: str) -> dict:
             "accuracy": float(ckpt.get("accuracy", -1.0))}
 
 
+def calibrate_activation_scales(checkpoint: str, cfg: dict, calib_path: str,
+                                precision: int) -> list[float]:
+    """Per-tensor activation scales from REAL data run through the float model.
+
+    Returns one scale for the network input plus one per weight layer's
+    output, which is the list quantize_model() expects. Each scale maps the
+    largest magnitude seen on the calibration samples onto qmax, exactly as
+    quant_ref.choose_scale() does for weights.
+
+    Two details matter:
+      * A weight layer followed by ReLU is calibrated on the POST-ReLU
+        values. Its negative outputs are about to be zeroed anyway, so letting
+        them saturate costs nothing and buys resolution where it counts.
+      * For an autoencoder, the LAST layer's output scale is tied to the
+        INPUT scale. The firmware scores a reconstruction as
+        |output - input| in raw int8 units (sw/src/main.c), which is only
+        meaningful if both are on the same scale.
+
+    The calibration file holds RAW features (`X`); they are normalised here
+    with the checkpoint's own train-set mean/std, the same transform train.py
+    applied, so calibration sees what the model saw.
+    """
+    import torch
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from models import build_model
+
+    ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model = build_model(cfg)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    z = np.load(calib_path, allow_pickle=False)
+    n = int(cfg["quantization"].get("calibration_samples", 256))
+    x = z["X"][:n].astype(np.float64)
+    x = (x - float(ckpt["norm_mean"])) / float(ckpt["norm_std"])
+    xt = torch.from_numpy(x.reshape(x.shape[0], -1).astype(np.float32))
+
+    scales = [qr.choose_scale(x, precision)]
+    mods = list(model)
+    with torch.no_grad():
+        cur = xt
+        for i, m in enumerate(mods):
+            cur = m(cur)
+            if isinstance(m, torch.nn.Linear) or isinstance(m, torch.nn.Conv2d):
+                nxt_relu = (i + 1 < len(mods)
+                            and isinstance(mods[i + 1], torch.nn.ReLU))
+                obs = torch.relu(cur) if nxt_relu else cur
+                scales.append(qr.choose_scale(obs.numpy(), precision))
+
+    if cfg["model"]["architecture"] == "fc_autoencoder":
+        scales[-1] = scales[0]
+    print(f"  calibrated on {x.shape[0]} real samples: "
+          + ", ".join(f"{s:.4g}" for s in scales))
+    return scales
+
+
 def quantize_model(model: dict, cfg: dict, act_scales: list[float] | None = None
                    ) -> dict:
     """Quantize every layer and derive its integer requantization parameters."""
@@ -275,6 +331,9 @@ def main() -> int:
                     help="override the config's weight precision (for the "
                          "RQ4 precision sweep)")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--calib-data", default=None,
+                    help=".npz of RAW real features (key X) used to calibrate "
+                         "activation scales; requires --checkpoint")
     args = ap.parse_args()
 
     # Refuse to run against a config that has drifted from its frozen hash.
@@ -304,7 +363,16 @@ def main() -> int:
     else:
         ap.error("give either --checkpoint or --synthetic")
 
-    q = quantize_model(model, cfg)
+    act_scales = None
+    if args.calib_data:
+        if not args.checkpoint:
+            ap.error("--calib-data needs --checkpoint (synthetic weights have "
+                     "nothing real to calibrate)")
+        act_scales = calibrate_activation_scales(
+            args.checkpoint, cfg, args.calib_data,
+            int(cfg["quantization"]["activation_precision"]))
+
+    q = quantize_model(model, cfg, act_scales)
     q["config_name"] = cfg["name"]
     q["seed"] = seed
 
@@ -323,9 +391,13 @@ def main() -> int:
         flat[f"L{i}_weight"] = L["weight"]
         flat[f"L{i}_bias"] = L["bias"]
         for k in ("multiplier", "shift", "zero_point", "precision",
-                  "stride", "pad"):
+                  "stride", "pad", "in_scale", "out_scale"):
             if k in L:
                 flat[f"L{i}_{k}"] = np.array(L[k])
+    # The input scale is what a host needs to quantize a real sensor frame
+    # into the int8 the firmware expects (train/dcase_pump.py uses it).
+    if q["layers"]:
+        flat["act_scale_0"] = np.array(q["layers"][0]["in_scale"])
     np.savez_compressed(args.out, **flat)
 
     print()

@@ -605,6 +605,139 @@ libgcc call on rv32i.
 
 ---
 
+## D025 — First real-data result: workload B on MIMII pump (DCASE 2020 split)
+
+**Decision.** Workload B's deployed model (8,904 parameters, the frozen
+config unchanged) was trained on real pump recordings, quantized with real
+calibration, and scored, using `train/dcase_pump.py`.
+
+**Data choice.** We used the DCASE 2020 Task 2 development split of MIMII pump
+(Zenodo 3678171, `dev_data_pump.zip`, 1.03 GB, CC BY-NC-SA 4.0) instead of the
+raw MIMII archive (7.66 GB). The raw archive downloaded at about 150 KB/s
+(about 13 hours). More importantly, the DCASE split was fixed by the challenge
+organisers rather than by us, and it has a published baseline scored with the
+same metrics. Train split: 3,349 normal clips (10% held out by clip for the
+detection threshold). Test split: 856 clips, of which 456 are anomalous. **These
+are industrial pumps, not handpumps** (D023). Every number here must say so.
+
+**Feature choice.** FFT magnitude, exactly per the frozen config (16 kHz,
+n_fft 1024, hop 512, first 128 bins), log-compressed as log(1 + |X|). The config
+does not fix linear vs log, so this is recorded here. One frame per inference
+(the deployed model's input_dim = 128). Clip score = mean per-frame
+reconstruction error.
+
+**Calibration added.** `quantize.py` previously had no real-data calibration
+path: activation scales were always fixed defaults. `--calib-data` now
+calibrates on 256 real frames, and ties the autoencoder's output scale to its
+input scale, so the firmware's |output - input| score is meaningful.
+
+**Results (single training run, seed 20260828):**
+
+| | AUC | pAUC (FPR ≤ 0.1) |
+|---|---|---|
+| Our model, float | 75.96% | 69.45% |
+| **Our model, int8 (chip arithmetic)** | **75.89%** | **69.48%** |
+| DCASE 2020 official baseline (≈264k params, log-mel, 5 frames) | 72.89% | 59.99% |
+
+Per machine ID, int8 AUC: id_00 78.7%, id_02 76.9%, id_04 64.0%, id_06 84.0%.
+The official baseline's are 67.15%, 61.53%, 88.33%, and 74.55%. We are better
+on three IDs and much worse on id_04. Baseline figures are from
+dcase.community/challenge2020/task-unsupervised-detection-of-anomalous-sounds,
+checked 2026-10-03.
+
+At the config's threshold (99th percentile of held-out normal clips), the int8
+model flags 33.8% of anomalous clips with 1.0% false alarms on normal test
+clips.
+
+**Quantization cost: 0.07 AUC points.** That is essentially free.
+
+**Chip check.** The real weights were exported (`sw/models_b_real`), with a
+real anomalous pump frame as the firmware's test input. Parity passes 13/13.
+On the simulated SoC (4×4 / 256), all three firmware variants computed
+reconstruction error 14, identical to Python. Cycles with real weights:
+baseline 5,065,309, DOT4 938,748 (5.40×), array 1,016,350 (4.98×).
+
+**A caveat this exposed.** With synthetic weights the baseline was 5,680,598
+cycles. Software multiply time on rv32i depends on the operand values, so
+**cycle counts measured with synthetic weights are close to, but not exactly,
+real-weight cycle counts**. The accelerated variants change much less. Any
+headline speedup should be re-measured with real weights.
+
+**Honest limits.** One seed, so there is no run-to-run spread yet. The official
+baseline reports a ± from repeated runs. The comparison also differs in
+features (FFT bins vs log-mel), not only model size. Our model is about 30×
+smaller, and it is the one that runs on the chip.
+
+---
+
+## D027 — On-device adaptation: a sensor that learns its own pump (exploratory)
+
+**Question.** Can a sensor installed on a pump it has never heard improve
+itself, using only a few minutes of that pump's normal sound, no labels and no
+internet? Motivated by D025, where one pump (id_04) scored far below the
+others.
+
+**Protocol** (`train/adapt_experiment.py`, results in
+`docs/results/ON_DEVICE_ADAPTATION.md`). Leave-one-pump-out: train the frozen
+workload-B model on three pumps, score the fourth unadapted, then adapt on N of
+the fourth pump's normal TRAIN clips and score its TEST clips (never used for
+adapting). Three seeds. Scores use the chip's int8 arithmetic, recalibrated on
+the same adaptation clips. The learning itself is simulated in float on the
+host.
+
+**Results (int8 AUC, mean over 3 seeds and 4 pumps):**
+
+| | Unadapted | 10 clips (1.7 min) | 30 clips (5 min) | 100 clips (17 min) |
+|---|---|---|---|---|
+| Retrain final layer only (4,224 weights) | 74.9% ± 0.9 | 77.4% ± 1.2 | 77.9% ± 1.0 | 78.0% ± 0.7 |
+| Retrain all layers (8,904 weights) | 74.9% ± 0.9 | 76.9% ± 1.3 | 78.1% ± 0.7 | 78.1% ± 1.0 |
+| Re-measure input level only (2 numbers) | 74.9% ± 0.9 | 74.7% ± 1.0 | 74.6% ± 1.0 | 74.6% ± 1.1 |
+
+1. **Adapting helps, and quickly.** About 3 AUC points on average, with most of
+   it from the first 1.7 minutes of sound.
+2. **The weak pump gains most.** id_04 went from 63.5% to 70.1% with 10 clips,
+   and 72.3% with 100. id_06 went from 76.8% to 85.0%.
+3. **Not every pump benefits.** id_02 got WORSE (81.0% to about 77%). Cause not
+   yet known. Report it, don't hide it.
+4. **Retraining only the final layer gets nearly all the gain.** This matters
+   for the chip. The earlier layers stay fixed, so their outputs for the
+   recorded clips can be computed once and stored. Each learning step is then
+   a batched matrix multiply on one 32×128 layer, which is the shape the array
+   handles best (D024: about 57× on batched matmul vs about 5× on single
+   inputs).
+5. Re-measuring only the input's level and spread does nothing.
+
+**Status: EXPLORATORY**, added after pre-registration. Three seeds, one
+dataset of industrial pumps. Not yet done: performing the learning in integer
+arithmetic on the chip, and measuring its cycles and energy.
+
+---
+
+## D026 — Configs are always read with the built-in parser
+
+**Decision.** `train/config.py::load_config` now always uses the built-in
+YAML subset parser, even when PyYAML is installed.
+
+**Why.** Installing PyYAML (part of setting up PyTorch training) made
+`train/freeze.py` refuse to train workload B with "FROZEN MODEL HAS CHANGED",
+although `git diff` showed the config untouched. Cause: the two parsers
+disagree on the folded `description: >` block. The built-in parser keeps
+`'>'` as the value and turns the folded lines into stray empty keys, so the
+same file produced a different dictionary, and therefore a different hash.
+The frozen hashes were all made with the built-in parser.
+
+**Checked, not assumed:** a field-by-field comparison of the two parses found
+that the description text was the ONLY difference. Every setting that affects
+a result is identical. After the change, both configs pass `require_frozen`
+with and without PyYAML installed.
+
+**How to apply.** The built-in parser's handling of `>` is a known quirk, and
+it now also contradicts the module docstring's claim that the parser "raises
+rather than guessing". Do not fix it in place: that would change every frozen
+hash. If it must be fixed, do it alongside new config names.
+
+---
+
 ## TODO_BLOCKED items
 
 These could not be completed and are **not** worked around with invented data.
